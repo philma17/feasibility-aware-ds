@@ -5,17 +5,118 @@ systems can be executed by simulated robots while respecting joint and torque
 limits and avoiding obstacles. The aim is to evaluate tracking error and
 execution feasibility in MuJoCo.
 
-Available local inputs include pretrained S2NNDS models and demonstration data
-for **Worm (LASA)** and **Five_Obstacle_DS (2D_Shapes)**. The supplied robot model
-is the **Franka Research 3 (FR3)**. Checkpoints, demonstrations, and scenario
-metadata are kept locally under ignored `data/`.
+The checkout runs the **Franka Research 3 (FR3)** in MuJoCo through a common
+entry point with separate **PIC joint-torque** and **position-servo** modules.
+Configuration selects the learned model, controller, task start, planar or
+spatial embedding, simulation parameters, and physical plant settings.
+Start positions can use saved joint angles or the existing multistart IK.
 
-Planned functionality includes PIC joint-torque control and a position servo,
-with configuration-driven model selection and task setup. Dataset support will
-cover LASA, 2D CSV, and 3D MAT inputs, with planar and spatial task embeddings.
+The local model catalog, [configs/models.yaml](configs/models.yaml), contains
+these packages supported by the source loaders:
 
-The checkout is currently a scaffold with input assets; no runnable entry point
-or experiment configurations are available yet.
+| Dataset | Selectable models |
+| --- | --- |
+| LASA | Angle, CShape, GShape, NShape, PShape, Sine, Sine_new, Sshape, Worm |
+| 2D_Shapes | Five_Obstacle_DS |
+| 3D_Shapes | Cshape_bottom |
+
+LASA MAT, 2D CSV, and 3D MAT normalization and the source float64 vector-field
+evaluation are retained. The four LASA `_benchmark` packages lack a source
+demonstration mapping and are explicitly rejected. Package loading has been
+checked for all 11 selectable models; this does not establish robot execution
+performance for every model.
+
+## Quick Start
+
+Use a Python environment with the dependencies in [requirements.txt](requirements.txt).
+The commands below were checked with Python 3.14.4 and the recorded dependency
+versions. Checkpoints, demonstrations, and upstream metadata must be provisioned
+locally under ignored `data/`; they are not included in a fresh Git clone.
+
+From the repository root, list models and check the Worm inputs without stepping:
+
+```bash
+python -B main.py --list-models
+python -B main.py configs/worm_pic.yaml --check
+```
+
+Run one nominal 20-second Worm/PIC experiment:
+
+```bash
+python -B main.py configs/worm_pic.yaml --output results/worm_pic
+```
+
+The output directory must be new. Omitting `--output` creates a unique directory
+under `results/`. The full Worm/PIC example has completed locally.
+
+Each successful run writes:
+
+| File | Content |
+| --- | --- |
+| `config_resolved.yaml` | Configuration after command-line overrides |
+| `manifest.json` | Status, input/code hashes, environment, actual plant, start, and embedding |
+| `traj.npz` | Raw measured states, ideal rollout, commands, applied torques, and diagnostics |
+| `controller.json` | Controller parameters and run diagnostics |
+| `metrics.json` | DS–TCP MSE, DTW, final distance, clearance, saturation, and domain exit |
+
+Trajectory keys include `t`, `P` (measured TCP), `P_ideal`, `Q`, `QD`,
+`tau_cmd`, and `tau_applied`. There are N+1 state samples for N intervals;
+use only the first N rows of torque channels. PIC retains its source terminal
+padding, while Servo torque arrays already contain N rows. `Q_des[k]` records
+the Servo target before updating; interval k applies `Q_des[k+1]`.
+
+Plotting is separate and off by default. Supply the matching local barrier
+checkpoint to compare saved ideal and measured trajectories without running a
+simulation (replace the checkpoint path below):
+
+```bash
+python -B -m evaluation.plots results/worm_pic \
+  --barrier-model /path/to/LASA/Worm/model_b.pth
+```
+
+This writes `results/worm_pic/plots/trajectory.png`. The plotting path has been
+checked on saved local runs. It reads `P_ideal` and `P` from `traj.npz` and shows
+world coordinates in millimeters, with equal axis scaling. For the horizontal
+Worm setup, these are world x and y. The model goal is marked; the barrier
+region and its zero contour are green, and configured obstacles are red.
+The matching `model_b.pth` can also be provisioned beside `model_f.pth`, in which
+case `--barrier-model` may be omitted. The plot records its additional barrier
+input and hash in the PNG metadata. Spatial tasks without a two-dimensional
+task plane are rejected explicitly.
+
+Five Obstacle and Servo configs are also available:
+`configs/five_obstacle_pic.yaml`, `configs/worm_servo.yaml`, and
+`configs/five_obstacle_servo.yaml`. Their initial states can be checked with
+`--check`. All four configurations have completed locally. Their results remain
+local under ignored `results/`; a completed run alone does not establish
+execution feasibility for other starts or settings.
+
+To select another package, change `model` to its catalog identifier. Choose a
+start for that model; set `task.q_start_rad` to `null` to use IK rather than
+reusing another model's saved joint angles. Existing values can also be
+overridden with repeated `--set KEY=VALUE` arguments.
+
+## Controller interface
+
+Both controllers observe the measured joint/TCP state and evaluate the DS at
+that state. PIC owns its tank and damping-basis state and returns a typed joint
+torque command; Servo owns its integrated `q_des` and returns a typed joint
+position command. The shared command type applies the appropriate MuJoCo input,
+and the common interval scheduler has no controller-name branches. Each controller
+keeps its diagnostics beside its callbacks. PIC refreshes dynamics before each
+observation; Servo keeps its source initial-forward and target-update ordering.
+
+Run the targeted checks with:
+
+```bash
+python -B -m unittest discover -s tests -v
+```
+
+MSE is the mean squared Euclidean position error in world coordinates [m²].
+DTW retains the source definition: 400 arc-length samples and mean alignment
+cost [m]. Clearance is geometric distance to the configured unsafe set;
+unsupported custom geometry is reported as unavailable. These diagnostics do
+not establish a safety or discrete-time passivity guarantee.
 
 Input paths and hashes are recorded in [asset_manifest.json](asset_manifest.json).
 Third-party source notices are in [vendor/S2NNDS](vendor/S2NNDS/SOURCE.txt) and
