@@ -1,0 +1,9 @@
+# Versions used for local verification with Python 3.14.4.
+numpy==2.5.4
+scipy==1.18.1
+mujoco==3.16.0
+torch==2.14.1
+pandas==3.0.6
+PyYAML==6.0.3
+pyLasaDataset==0.2.1
+matplotlib==3.11.2
