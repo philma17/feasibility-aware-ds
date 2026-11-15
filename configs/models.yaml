@@ -1,0 +1,138 @@
+# Local package paths; availability does not imply robot-execution validation.
+models:
+  2D_Shapes/Five_Obstacle_DS:
+    dataset: 2D_Shapes
+    shape: Five_Obstacle_DS
+    selectable: true
+    checkpoint: data/models/2D_Shapes/Five_Obstacle_DS/model_f.pth
+    metadata: data/metadata/2D_Shapes/Five_Obstacle_DS_config.json
+    demos:
+    - data/demos/2D_Shapes/Five_Obstacle_DS/data_1M.csv
+    - data/demos/2D_Shapes/Five_Obstacle_DS/data_2M.csv
+    - data/demos/2D_Shapes/Five_Obstacle_DS/data_3M.csv
+    - data/demos/2D_Shapes/Five_Obstacle_DS/data_4M.csv
+    - data/demos/2D_Shapes/Five_Obstacle_DS/data_5M.csv
+    dimension: 2
+  3D_Shapes/Cshape_bottom:
+    dataset: 3D_Shapes
+    shape: Cshape_bottom
+    selectable: true
+    checkpoint: data/models/3D_Shapes/Cshape_bottom/model_f.pth
+    metadata: data/metadata/3D_Shapes/Cshape_bottom_config.json
+    demos:
+    - data/demos/3D_Shapes/3D_Cshape_bottom.mat
+    dimension: 3
+  LASA/Angle:
+    dataset: LASA
+    shape: Angle
+    selectable: true
+    checkpoint: data/models/LASA/Angle/model_f.pth
+    metadata: data/metadata/LASA/Angle_config.json
+    demo_name: Angle
+    demos:
+    - data/demos/LASA/Angle.mat
+    dimension: 2
+  LASA/CShape:
+    dataset: LASA
+    shape: CShape
+    selectable: true
+    checkpoint: data/models/LASA/CShape/model_f.pth
+    metadata: data/metadata/LASA/CShape_config.json
+    demo_name: CShape
+    demos:
+    - data/demos/LASA/CShape.mat
+    dimension: 2
+  LASA/GShape:
+    dataset: LASA
+    shape: GShape
+    selectable: true
+    checkpoint: data/models/LASA/GShape/model_f.pth
+    metadata: data/metadata/LASA/GShape_config.json
+    demo_name: GShape
+    demos:
+    - data/demos/LASA/GShape.mat
+    dimension: 2
+  LASA/NShape:
+    dataset: LASA
+    shape: NShape
+    selectable: true
+    checkpoint: data/models/LASA/NShape/model_f.pth
+    metadata: data/metadata/LASA/NShape_config.json
+    demo_name: NShape
+    demos:
+    - data/demos/LASA/NShape.mat
+    dimension: 2
+  LASA/PShape:
+    dataset: LASA
+    shape: PShape
+    selectable: true
+    checkpoint: data/models/LASA/PShape/model_f.pth
+    metadata: data/metadata/LASA/PShape_config.json
+    demo_name: PShape
+    demos:
+    - data/demos/LASA/PShape.mat
+    dimension: 2
+  LASA/PShape_benchmark:
+    dataset: LASA
+    shape: PShape_benchmark
+    selectable: false
+    reason: shape name has no entry in common.ds.LASA_DATASET (no demonstration data
+      mapping in this repository)
+  LASA/Sine:
+    dataset: LASA
+    shape: Sine
+    selectable: true
+    checkpoint: data/models/LASA/Sine/model_f.pth
+    metadata: data/metadata/LASA/Sine_config.json
+    demo_name: Sine
+    demos:
+    - data/demos/LASA/Sine.mat
+    dimension: 2
+  LASA/Sine_benchmark:
+    dataset: LASA
+    shape: Sine_benchmark
+    selectable: false
+    reason: shape name has no entry in common.ds.LASA_DATASET (no demonstration data
+      mapping in this repository)
+  LASA/Sine_new:
+    dataset: LASA
+    shape: Sine_new
+    selectable: true
+    checkpoint: data/models/LASA/Sine_new/model_f.pth
+    metadata: data/metadata/LASA/Sine_new_config.json
+    demo_name: Sine
+    demos:
+    - data/demos/LASA/Sine.mat
+    dimension: 2
+  LASA/Sshape:
+    dataset: LASA
+    shape: Sshape
+    selectable: true
+    checkpoint: data/models/LASA/Sshape/model_f.pth
+    metadata: data/metadata/LASA/Sshape_config.json
+    demo_name: Sshape
+    demos:
+    - data/demos/LASA/Sshape.mat
+    dimension: 2
+  LASA/Sshape_benchmark:
+    dataset: LASA
+    shape: Sshape_benchmark
+    selectable: false
+    reason: shape name has no entry in common.ds.LASA_DATASET (no demonstration data
+      mapping in this repository)
+  LASA/Worm:
+    dataset: LASA
+    shape: Worm
+    selectable: true
+    checkpoint: data/models/LASA/Worm/model_f.pth
+    metadata: data/metadata/LASA/Worm_config.json
+    demo_name: Worm
+    demos:
+    - data/demos/LASA/Worm.mat
+    dimension: 2
+  LASA/Worm_benchmark:
+    dataset: LASA
+    shape: Worm_benchmark
+    selectable: false
+    reason: shape name has no entry in common.ds.LASA_DATASET (no demonstration data
+      mapping in this repository)

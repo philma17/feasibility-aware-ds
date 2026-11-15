@@ -72,6 +72,70 @@
       "source": "data/S2NNDS_all/Datasets/2D_Shapes/Five_Obstacle_DS/data_5M.csv"
     },
     {
+      "path": "data/demos/3D_Shapes/3D_Cshape_bottom.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 293403,
+      "sha256": "74bebe9f168498bc92e67f657e09f8bd48c6c5754bb6f2e9e151376d5fa38bbe",
+      "source": "Datasets/3D_Shapes/3D_Cshape_bottom.mat"
+    },
+    {
+      "path": "data/demos/LASA/Angle.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 362757,
+      "sha256": "15c278073fd913e42aa4097e2d52eeba15d2e762b26805afcbe881da45561d9a",
+      "source": "pyLasaDataset local cache: Angle.mat"
+    },
+    {
+      "path": "data/demos/LASA/CShape.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 345599,
+      "sha256": "c7c58ea6a1f085d0656449abedf84b1f6629b265b6ff2834147c2515557822f6",
+      "source": "pyLasaDataset local cache: CShape.mat"
+    },
+    {
+      "path": "data/demos/LASA/GShape.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 357293,
+      "sha256": "4d6f5db564ae8d5351bf34dbb4f4e4523b3ba9b7045da41727e9bed5c18412d1",
+      "source": "pyLasaDataset local cache: GShape.mat"
+    },
+    {
+      "path": "data/demos/LASA/NShape.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 360660,
+      "sha256": "d84ac5c67c4e3e1910aeadd12e8f74a318aa3d0ce3de870fa04a735d624abe86",
+      "source": "pyLasaDataset local cache: NShape.mat"
+    },
+    {
+      "path": "data/demos/LASA/PShape.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 355731,
+      "sha256": "19e9ef909f543e169d67657a2b00c165da070abcf7bf8ce546f5125a5e3f73cc",
+      "source": "pyLasaDataset local cache: PShape.mat"
+    },
+    {
+      "path": "data/demos/LASA/Sine.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 362222,
+      "sha256": "66d0b7d7d0c40c36414315904d0d8e2d728ea86dbe767a7b92151cf6c1002e1f",
+      "source": "pyLasaDataset local cache: Sine.mat"
+    },
+    {
+      "path": "data/demos/LASA/Sshape.mat",
+      "role": "demonstrations",
+      "versioned": false,
+      "bytes": 356758,
+      "sha256": "0787d897e6c99162bacc9ab4f147c4e612afa5e7d4bfb3e2a883e3b28b099881",
+      "source": "pyLasaDataset local cache: Sshape.mat"
+    },
+    {
       "path": "data/demos/LASA/Worm.mat",
       "role": "demonstrations",
       "versioned": false,
@@ -88,6 +152,78 @@
       "source": "data/S2NNDS_all/config_files/2D_Shapes/Five_Obstacle_DS_config.json"
     },
     {
+      "path": "data/metadata/3D_Shapes/Cshape_bottom_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 3120,
+      "sha256": "f9dfa67f57eeda8794868cab548be0d076150f0f94450c259af94d610618b534",
+      "source": "config_files/3D_Shapes/Cshape_bottom_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/Angle_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2957,
+      "sha256": "19fbfaacf2d8582e3f1e2c589d0b8bf252ef4edb5d28a44c20eae0c5c43f6923",
+      "source": "config_files/LASA/Angle_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/CShape_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2801,
+      "sha256": "40a78228b285bb241fcfcea622095b033e19fb3204f6eef85937704fc91b4913",
+      "source": "config_files/LASA/CShape_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/GShape_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2901,
+      "sha256": "1c578f68869cd32094c37e5929311516881e23f5167026366df90d2e686c5a12",
+      "source": "config_files/LASA/GShape_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/NShape_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2898,
+      "sha256": "f7add2536a4b763f63d9df7186d7c0f79deea1dcef425f635854f5f4463513ff",
+      "source": "config_files/LASA/NShape_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/PShape_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2884,
+      "sha256": "ec4182690d75062b26df507a5414bd636f0969e4aaf459a6cfc8f04077c5ac9f",
+      "source": "config_files/LASA/PShape_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/Sine_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2940,
+      "sha256": "302f79e8769d1d02b04ccc73b810d2ac81b761866c84f3f8f5e56022c84baeac",
+      "source": "config_files/LASA/Sine_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/Sine_new_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 3017,
+      "sha256": "76014eca075b44646176b04bb54773799e6f745c359d17feb6f8ca12a838ae18",
+      "source": "config_files/LASA/Sine_new_config.json"
+    },
+    {
+      "path": "data/metadata/LASA/Sshape_config.json",
+      "role": "upstream_scenario_metadata",
+      "versioned": false,
+      "bytes": 2976,
+      "sha256": "3b1415258641ea148e637c68c55fe51b0277425e98d2419eb19c464238b54ddb",
+      "source": "config_files/LASA/Sshape_config.json"
+    },
+    {
       "path": "data/metadata/LASA/Worm_config.json",
       "role": "upstream_scenario_metadata",
       "versioned": false,
@@ -102,6 +238,78 @@
       "bytes": 37520,
       "sha256": "fbcd10d2ff7dfa9c34a24366fa6992df54aa61f89b45f1c7b36a1dee85c0e82c",
       "source": "data/S2NNDS_all/models_verified/2D_Shapes/Five_Obstacle_DS/model_f.pth"
+    },
+    {
+      "path": "data/models/3D_Shapes/Cshape_bottom/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 203291,
+      "sha256": "530597a2834dde23a82d28b5c016743be2d6c854da94bd683ce1bd822855921e",
+      "source": "models_verified/3D_Shapes/Cshape_bottom/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/Angle/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 4131,
+      "sha256": "c8c7936dff4fd5d643f1979c0e7e1263793c01945782cbc55b5a021e7395e996",
+      "source": "models_verified/LASA/Angle/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/CShape/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 7459,
+      "sha256": "32b5276037b1b3e129180a5be365b2b6766ee7311968ee78d1c8ff6d123d3964",
+      "source": "models_verified/LASA/CShape/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/GShape/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 53787,
+      "sha256": "cb517a7e8421a9ffe912eeadc0e1eff00c6c9a8557c119a5dc86f4b33f406c56",
+      "source": "models_verified/LASA/GShape/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/NShape/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 53851,
+      "sha256": "91e735a231cfbbc1a16d72dbb39fc10b03a2dfe246ad3682d9286691584fd3b5",
+      "source": "models_verified/LASA/NShape/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/PShape/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 53851,
+      "sha256": "6045361bd455d489d8669c876315d88ddb825e546b85ca84763b83c476e66850",
+      "source": "models_verified/LASA/PShape/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/Sine/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 53787,
+      "sha256": "54558ea680850ab999b3f79594be9820e76724b39f1c62e7f2760e58feab3769",
+      "source": "models_verified/LASA/Sine/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/Sine_new/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 54348,
+      "sha256": "ef0a6b54466008916966f56e8504c31251bf695c176834fa84d566cda1e84887",
+      "source": "models_verified/LASA/Sine_new/model_f.pth"
+    },
+    {
+      "path": "data/models/LASA/Sshape/model_f.pth",
+      "role": "dynamics_checkpoint",
+      "versioned": false,
+      "bytes": 53787,
+      "sha256": "8a2cbb33ff4aebf5d467f0bd3f679a7aadba231cfc833ef04c01a7489ff67c1a",
+      "source": "models_verified/LASA/Sshape/model_f.pth"
     },
     {
       "path": "data/models/LASA/Worm/model_f.pth",
@@ -439,5 +647,26 @@
       "sha256": "0d0e502d0c517a33217dac859fa84fbb74c7ab9b2f104c64c70a41dfa77e6d2f",
       "source": "vendor/mujoco_menagerie/franka_fr3/fr3.xml"
     }
-  ]
+  ],
+  "source_code_sha256": {
+    "common/ds.py": "dc368c53f596974e86f2a6b4547308cfcf77727e423e43b630edca3c5dc9ca62",
+    "common/datasets.py": "77d847f47060387de264821a5aa8e3785a12956bf14d9cd37a114a4ddabf8609",
+    "common/embedding.py": "128b25b629496e14234e0b4b70ea41813dd2f51ffde7d08d596289f89347d061",
+    "common/robots.py": "6bdf3ff7ca1eb82bf6f926573194d1c22e3cf4b9dae562d2704ab8e229595c95",
+    "common/ik.py": "97f4bb3603eda1a8712fe687c0aa0922742d56d281bebd5cece1dfa1150de18e",
+    "common/task_space.py": "7634581e19ba8bc4a08f370edbb12f651c87d139b6533b92b25306efb6295d65",
+    "common/sim.py": "3846c95280daabbc4d000fc4604bb5c0de7ba0519664f70c9faa17aa8a896af6",
+    "common/sim_dynamic.py": "03b89861bb22b8de2e0fb4c5e7071862cf1badf6b670a378bda2a7ad17335795",
+    "common/sim_loop.py": "b0d0f1034fa918214e3c6305f4b63bac844a8e16e17284863b8065799aac5b0c",
+    "common/unsafe.py": "bca40616278a481610eec0214101d094687398d58ff65c0003d3789c95a5569c",
+    "common/metrics.py": "767ed96b444ecc67350bea7a6c0e0ed53b93c2cfa9be368ca17b8fa9c43b6df6",
+    "pic/controller.py": "e5849becbecfaf54da56b52fd7519ae19217419ff8286adb83551c8aac7c15b4",
+    "pic/sim_pic.py": "ac51fff417f2f4d81a0241021138205d95e85e512be54b3ccccfc643eaf151b2",
+    "pic/scenario_setup.py": "21d5bb3ce0259617029be1b8eb849f957268714c771fd0d4773b107437ed6fd5",
+    "pic/plant.py": "6ed0113ff9ec9c9f19b3a1a095319521c8db102f68d55d0dbeb05a7abac61d4e",
+    "common/VENDORED.txt": "9d2409481fea7d27ed33c699791d1b81ba061e8ae3cfbf06bff43a2baedbc845",
+    "common/local_patches/ds.py.patch": "e4f73dfb76c33e8672976c9fb501f7b78f8706c7b0e2b740e31bdd43247cf2a5",
+    "common/local_patches/robots.py.patch": "7dd49eb5843de6bc50d6854bc95a555e73bbc2c003b1abfc9b764fd28a1e5d76",
+    "common/local_patches/sim_dynamic.py.patch": "9957ee394b205c7646fcd2583f9405dcb768cd9b72663d9598af31f50814d99d"
+  }
 }
