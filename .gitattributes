@@ -1,0 +1,2 @@
+# Preserve mesh bytes and review them as complete assets.
+vendor/franka_fr3/assets/* binary

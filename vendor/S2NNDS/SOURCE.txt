@@ -1,0 +1,14 @@
+Project: S2NNDS
+Upstream: https://github.com/allemmbinn/S2NNDS
+Recorded upstream revision: 3636a91d3d52a960d8f2f6f31da7b89f43e58602
+Copied file: LfD_sim/vendor/S2NNDS/NNModels.py
+Source checkout: 63e07b4f22240790818a0d884cb634e3b2a90054 (local changes recorded in asset_manifest.json)
+
+NNModels.py is byte-identical to the existing adapter in LfD_sim. That adapter
+replaces the upstream common_header wildcard import with the Torch imports
+needed to unpickle the saved network classes. No further adaptation was made.
+
+Checkpoint files are provisioned locally under ignored data/ and are not
+included in this Git repository. The historical permission note in LfD_sim
+refers to its Sine bundle; it does not document redistribution permission for
+Worm or Five_Obstacle_DS weights.

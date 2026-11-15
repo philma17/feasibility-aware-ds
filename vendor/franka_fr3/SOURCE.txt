@@ -1,0 +1,15 @@
+Project: MuJoCo Menagerie / Franka Research 3
+Upstream: https://github.com/google-deepmind/mujoco_menagerie
+Copied from: LfD_sim/vendor/mujoco_menagerie/franka_fr3/
+Source checkout: 63e07b4f22240790818a0d884cb634e3b2a90054 (local changes recorded in asset_manifest.json)
+
+Included: fr3.xml, its 36 referenced meshes, and LICENSE.
+The copied files are byte-identical to the source checkout. No XML or mesh
+parameters were changed. The model uses the attachment_site TCP.
+
+Revision discrepancy in the source: common/robots.py labels Menagerie as
+cda5236f98383f6fbaa4820c6b18dba892cd087f, while common/VENDORED.txt says the
+FR3 files match d7b481b. This migration has not independently resolved the
+upstream revision. The exact copied-file hashes are in asset_manifest.json.
+
+License: Apache-2.0; see LICENSE.

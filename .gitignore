@@ -1,0 +1,24 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Checkpoints and demonstration data are provisioned locally.
+data/
+*.pth
+*.pt
+*.onnx
+*.safetensors
+
+# Generated runs, figures, and coverage reports
+results/
+figures/
+.mplconfig/
+.coverage*
+htmlcov/
+
+# Local editor settings
+.vscode/
+.idea/
