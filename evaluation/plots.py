@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
+import csv
 import json
 from pathlib import Path
 
@@ -14,9 +14,13 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Polygon
 import numpy as np
-import yaml
 
 from evaluation.metrics import UnsafeSet
+from evaluation.barrier import (
+    barrier_values, domain_box, evaluate_run, file_sha256, model_to_world,
+    resolve_barrier_model, saved_model_inputs,
+)
+from evaluation.aggregate import EVENTS, event_value
 
 
 def task_plane_mm(points, embedding):
@@ -48,53 +52,6 @@ def world_axes(embedding):
     return list(max(pairs, key=lambda pair: abs(np.linalg.det(axes[list(pair)]))))
 
 
-def model_to_world(points, embedding):
-    """Use the run's effective embedding, as in LfD_sim/pic/plots.py::to_world."""
-    return np.asarray(embedding["origin"]) + embedding["L_m"] * (
-        (np.asarray(points) - np.asarray(embedding["anchor_n"])) @ np.asarray(embedding["axes"]).T
-    )
-
-
-def file_sha256(path):
-    with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
-
-
-def saved_model_inputs(run_dir, manifest):
-    """Resolve catalog inputs only if they still match the hashes saved by the run."""
-    from sim.ds import input_path, model_catalog
-
-    cfg_path = run_dir / "config_resolved.yaml"
-    if file_sha256(cfg_path) != manifest["artifact_sha256"]["config_resolved.yaml"]:
-        raise ValueError("Saved effective configuration hash does not match the run")
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    catalog = cfg["model_catalog"]
-    if file_sha256(input_path(catalog)) != manifest["input_sha256"][catalog]:
-        raise ValueError("Model catalog has changed since this run")
-    package = model_catalog(catalog)[manifest["model"]]
-    for key in ("metadata", "checkpoint"):
-        path = package[key]
-        if file_sha256(input_path(path)) != manifest["input_sha256"][path]:
-            raise ValueError(f"Model input has changed since this run: {path}")
-    spec = json.loads(input_path(package["metadata"]).read_text(encoding="utf-8"))
-    return cfg, package, spec
-
-
-def barrier_values(path, points):
-    """Reuse LfD_sim/experiments/inspect_lasa_packages.py float32 network evaluation."""
-    import torch
-    from sim.ds import load_torch_reference
-
-    model = load_torch_reference(path).cpu()
-    if points.shape[1] != model.input_size or not np.isfinite(points).all():
-        raise ValueError("Barrier input dimension or finite values do not match model")
-    with torch.no_grad():
-        values = model(torch.as_tensor(points, dtype=torch.float32)).numpy().reshape(-1)
-    if not np.isfinite(values).all():
-        raise ValueError("Nonfinite barrier output")
-    return values
-
-
 def obstacle_level(spec, points):
     """Retain the source level sets; never evaluate arbitrary config expressions."""
     unsafe = UnsafeSet(spec, 2)
@@ -113,6 +70,7 @@ def obstacle_level(spec, points):
 def draw_regions(ax, spec, embedding, displayed_axes, paths, barrier_model):
     """Map normalized regions to the same world view as paths and the model goal."""
     # Adapted from LfD_sim/analysis/failure/report_figures.py::draw_regions.
+    box = domain_box(spec)
     bounds = np.asarray(spec.get("plotting", {}).get("range", spec["domain"]["range"]), float)
     normalized = np.concatenate(
         [
@@ -122,17 +80,31 @@ def draw_regions(ax, spec, embedding, displayed_axes, paths, barrier_model):
         ]
         + [np.zeros((1, 2))]
     )
-    lo = np.minimum(bounds[:, 0], normalized.min(axis=0))
-    hi = np.maximum(bounds[:, 1], normalized.max(axis=0))
+    lo = np.minimum(np.minimum(bounds[:, 0], box[:, 0]), normalized.min(axis=0))
+    hi = np.maximum(np.maximum(bounds[:, 1], box[:, 1]), normalized.max(axis=0))
     grid = np.stack(np.meshgrid(*[np.linspace(a, b, 320) for a, b in zip(lo, hi)]), -1)
     points = grid.reshape(-1, 2)
     world = (1000 * model_to_world(points, embedding)[:, displayed_axes]).reshape(320, 320, 2)
     wx, wy = world[..., 0], world[..., 1]
-    handles = []
+    corners = np.array([
+        [box[0, 0], box[1, 0]], [box[0, 1], box[1, 0]],
+        [box[0, 1], box[1, 1]], [box[0, 0], box[1, 1]],
+    ])
+    vertices = 1000 * model_to_world(corners, embedding)[:, displayed_axes]
+    domain_patch = Polygon(vertices, fill=False, edgecolor="0.35", ls="--", lw=1.2, zorder=2)
+    ax.add_patch(domain_patch)
+    handles = [Line2D([], [], color="0.35", ls="--", label=r"$X$ (model box)")]
     if spec.get("Barrier", False):
-        B = barrier_values(barrier_model, points).reshape(grid.shape[:2])
-        ax.contourf(wx, wy, B, levels=[-np.inf, 0], colors=["#d4f5d4"], zorder=0)
-        ax.contour(wx, wy, B, levels=[0], colors=["#1a8f1a"], linewidths=1, zorder=1)
+        # Evaluate on X itself: neither the fill nor its contour extrapolates beyond X.
+        bgrid = np.stack(np.meshgrid(*[np.linspace(a, b, 320) for a, b in box]), -1)
+        bpoints = bgrid.reshape(-1, 2)
+        bworld = (1000 * model_to_world(bpoints, embedding)[:, displayed_axes]).reshape(320, 320, 2)
+        bx, by = bworld[..., 0], bworld[..., 1]
+        B = barrier_values(barrier_model, bpoints).reshape(bgrid.shape[:2])
+        fill = ax.contourf(bx, by, B, levels=[-np.inf, 0], colors=["#d4f5d4"], zorder=0)
+        contour = ax.contour(bx, by, B, levels=[0], colors=["#1a8f1a"], linewidths=1, zorder=1)
+        fill.set_clip_path(domain_patch)
+        contour.set_clip_path(domain_patch)
         handles += [
             Patch(fc="#d4f5d4", ec="#1a8f1a", label=r"$B\leq 0$"),
             Line2D([], [], color="#1a8f1a", label=r"$B=0$"),
@@ -183,10 +155,8 @@ def experiment_setting(cfg):
     return "Nominal" if nominal else "Configured"
 
 
-def plot_trajectory(run_dir, barrier_model=None):
-    """Write a world-coordinate view; model goal is x_n=0, not the rollout endpoint."""
-    from sim.ds import input_path
-
+def load_plot_run(run_dir, barrier_model=None, start_id=None):
+    """Load the same verified inputs for a single trajectory or a batch overlay."""
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     cfg, package, spec = saved_model_inputs(run_dir, manifest)
@@ -194,51 +164,113 @@ def plot_trajectory(run_dir, barrier_model=None):
     displayed_axes = world_axes(emb)
     with np.load(run_dir / "traj.npz", allow_pickle=False) as arrays:
         measured_world, ideal_world = arrays["P"], arrays["P_ideal"]
-    measured = 1000 * measured_world[:, displayed_axes]
-    ideal = 1000 * ideal_world[:, displayed_axes]
-    goal = 1000 * model_to_world(np.zeros(2), emb)[displayed_axes]
+    # Validate both arrays before drawing or combining several saved runs.
+    task_plane_mm(measured_world, emb)
+    task_plane_mm(ideal_world, emb)
     plot_inputs = {
         "world_axes": displayed_axes,
         "metadata": package["metadata"],
         "metadata_sha256": manifest["input_sha256"][package["metadata"]],
     }
     if spec.get("Barrier", False):
-        barrier_model = (
-            Path(barrier_model)
-            if barrier_model
-            else input_path(package["checkpoint"]).with_name("model_b.pth")
-        )
-        if not barrier_model.is_file():
-            raise ValueError(
-                "Barrier model missing; supply the matching local --barrier-model PATH"
-            )
-        # The extra plotting input must belong to the same vector-field package.
-        sibling_f = barrier_model.with_name("model_f.pth")
-        if file_sha256(sibling_f) != manifest["input_sha256"][package["checkpoint"]]:
-            raise ValueError("Barrier package model_f.pth does not match this run")
+        barrier_model = resolve_barrier_model(package, manifest, barrier_model)
         plot_inputs.update(
             barrier_model=str(barrier_model.resolve()), barrier_sha256=file_sha256(barrier_model)
         )
+    return {
+        "start_id": start_id or manifest.get("start_id", run_dir.name),
+        "run_dir": str(run_dir.resolve()),
+        "manifest": manifest,
+        "cfg": cfg,
+        "package": package,
+        "spec": spec,
+        "embedding": emb,
+        "displayed_axes": displayed_axes,
+        "measured_world": measured_world,
+        "ideal_world": ideal_world,
+        "barrier_model": barrier_model,
+        "plot_inputs": plot_inputs,
+    }
+
+
+def draw_trajectories(runs, path, selection=None):
+    """Draw one shared world frame, with a color per start and a line style per path type."""
+    first = runs[0]
+    emb, displayed_axes = first["embedding"], first["displayed_axes"]
+    for run in runs[1:]:
+        if (
+            run["manifest"]["model"] != first["manifest"]["model"]
+            or run["manifest"]["robot"] != first["manifest"]["robot"]
+            or run["embedding"] != emb
+            or run["spec"] != first["spec"]
+            or experiment_setting(run["cfg"]) != experiment_setting(first["cfg"])
+            or run["plot_inputs"] != first["plot_inputs"]
+        ):
+            raise ValueError("Overlay requires the same model, robot, embedding and plot inputs")
+    goal = 1000 * model_to_world(np.zeros(2), emb)[displayed_axes]
+    plot_inputs = {
+        **first["plot_inputs"],
+        "selection": selection,
+        "runs": [{k: run[k] for k in ("start_id", "run_dir")} for run in runs],
+    }
 
     fig, ax = plt.subplots(figsize=(7, 6), layout="constrained")
     try:
         regions = draw_regions(
-            ax, spec, emb, displayed_axes, [measured_world, ideal_world], barrier_model
+            ax,
+            first["spec"],
+            emb,
+            displayed_axes,
+            [run[key] for run in runs for key in ("measured_world", "ideal_world")],
+            first["barrier_model"],
         )
-        ax.plot(*ideal.T, "k--", lw=1.2, label="Ideal DS", zorder=3)
-        ax.plot(*measured.T, color="tab:orange", lw=1.8, label="Robot Path", zorder=4)
+        overlay = len(runs) > 1
+        handles = []
+        if overlay:
+            handles = [
+                Line2D([], [], color="black", ls="--", lw=1.2, label="Ideal DS"),
+                Line2D([], [], color="black", lw=1.8, label="Robot Path"),
+            ]
+        colors = plt.get_cmap("tab20" if len(runs) > 10 else "tab10")
+        for i, run in enumerate(runs):
+            color = colors(i % colors.N)
+            ideal = 1000 * run["ideal_world"][:, displayed_axes]
+            measured = 1000 * run["measured_world"][:, displayed_axes]
+            ax.plot(
+                *ideal.T,
+                ls="--",
+                color=color if overlay else "black",
+                lw=1.2,
+                label="_nolegend_" if overlay else "Ideal DS",
+                zorder=3,
+            )
+            ax.plot(
+                *measured.T,
+                color=color if overlay else "tab:orange",
+                lw=1.8,
+                label="_nolegend_" if overlay else "Robot Path",
+                zorder=4,
+            )
+            if overlay:
+                handles.append(Line2D([], [], color=color, label=run["start_id"]))
         ax.plot(*goal, "*", color="black", ms=13, label="DS Goal", zorder=5)
         names = "xyz"
         ax.set(
             xlabel=rf"${names[displayed_axes[0]]}\,[\mathrm{{mm}}]$",
             ylabel=rf"${names[displayed_axes[1]]}\,[\mathrm{{mm}}]$",
-            title=f"{package['shape']} / {manifest['robot']} / {experiment_setting(cfg)}",
+            title=(
+                f"{first['package']['shape']} / {first['manifest']['robot']} / "
+                f"{experiment_setting(first['cfg'])}"
+            ),
         )
         ax.set_aspect("equal", adjustable="box")
+        # Keep all four domain edges visible rather than coincident with the axes spines.
+        ax.use_sticky_edges = False
+        ax.margins(0.04)
         ax.grid(alpha=0.3)
-        handles, _ = ax.get_legend_handles_labels()
-        ax.legend(handles=handles + regions)
-        path = run_dir / "plots" / "trajectory.png"
+        path_handles, _ = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + path_handles + regions)
+        path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=150, metadata={"Description": json.dumps(plot_inputs)})
     finally:
@@ -246,11 +278,97 @@ def plot_trajectory(run_dir, barrier_model=None):
     return path
 
 
+def plot_trajectory(run_dir, barrier_model=None):
+    """Write the existing single-run view with the model goal at x_n=0."""
+    run = load_plot_run(run_dir, barrier_model)
+    report = evaluate_run(run_dir, run["barrier_model"]) if run["spec"].get("Barrier") else None
+    path = draw_trajectories([run], Path(run_dir) / "plots" / "trajectory.png")
+    if report is not None:
+        path.with_name("barrier.json").write_text(
+            json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
+        print_barrier_events(report)
+    return path
+
+
+def print_barrier_events(report):
+    """Show the first observed sample for each path and event, without merging them."""
+    if report.get("status") != "evaluated":
+        return
+    for name, result in report["paths"].items():
+        for label, key in (("B>0 inside X", "first_positive_inside_s"),
+                           ("box exit", "first_box_exit_s")):
+            time = result[key]
+            detail = "keine" if time is None else f"{report['start_id']} at t={time:.9g} s"
+            print(f"{name}: first {label}: {detail}")
+
+
+def select_batch_runs(batch_dir, start_ids=None, event=None):
+    """Select only explicit IDs or true saved events; never interpret NA as false."""
+    batch_dir = Path(batch_dir)
+    if bool(start_ids) == bool(event):
+        raise ValueError("Select batch runs with either --start-id ID (repeatable) or --event EVENT")
+    with (batch_dir / "runs.csv").open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"start_id", "run_dir"}
+        if not required <= set(reader.fieldnames or ()):
+            raise ValueError("Batch runs.csv requires start_id and run_dir")
+        rows = list(reader)
+    ids = [row["start_id"] for row in rows]
+    if any(not value for value in ids) or len(set(ids)) != len(ids):
+        raise ValueError("Batch runs.csv requires unique, nonempty start IDs")
+    if any(not row["run_dir"] or not row["run_dir"].strip() for row in rows):
+        raise ValueError("Batch runs.csv requires nonempty run directories")
+    if start_ids:
+        missing = set(start_ids) - set(ids)
+        if missing:
+            raise ValueError(f"Unknown start IDs: {', '.join(sorted(missing))}")
+        rows = [row for row in rows if row["start_id"] in set(start_ids)]
+    else:
+        checked = sum(event_value(row, event) is not None for row in rows)
+        rows = [row for row in rows if event_value(row, event) is True]
+        if not rows:
+            raise ValueError(f"No runs match {event}; evaluated: {checked}/{len(ids)}; others: NA")
+    return [
+        (
+            row["start_id"],
+            Path(row["run_dir"])
+            if Path(row["run_dir"]).is_absolute()
+            else batch_dir / row["run_dir"],
+        )
+        for row in rows
+    ]
+
+
+def plot_batch(batch_dir, barrier_model=None, *, start_ids=None, event=None):
+    """Overlay selected saved runs in the batch folder, without plotting other runs."""
+    selected = select_batch_runs(batch_dir, start_ids, event)
+    runs = [load_plot_run(directory, barrier_model, start_id) for start_id, directory in selected]
+    name = f"trajectory_{event}.png" if event else "trajectory_selected.png"
+    path = draw_trajectories(
+        runs,
+        Path(batch_dir) / "plots" / name,
+        selection={"event": event, "start_ids": [start_id for start_id, _ in selected]},
+    )
+    reports = [evaluate_run(run["run_dir"], run["barrier_model"], run["start_id"])
+               for run in runs if run["spec"].get("Barrier")]
+    if reports:
+        path.with_suffix(".barrier.json").write_text(
+            json.dumps({"runs": reports}, indent=2, allow_nan=False) + "\n", encoding="utf-8"
+        )
+        for report in reports:
+            print_barrier_events(report)
+    return path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "run_dir", type=Path, help="saved run containing traj.npz and manifest.json"
+        "run_dir", type=Path, help="saved run or batch directory containing runs.csv"
     )
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--start-id", action="append", help="batch start ID (repeatable)")
+    selection.add_argument("--event", choices=EVENTS, help="select true saved events from runs.csv")
     parser.add_argument(
         "--barrier-model",
         type=Path,
@@ -258,7 +376,16 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
     try:
-        path = plot_trajectory(args.run_dir, args.barrier_model)
+        if (args.run_dir / "manifest.json").is_file():
+            if args.start_id or args.event:
+                raise ValueError("--start-id and --event require a batch directory")
+            path = plot_trajectory(args.run_dir, args.barrier_model)
+        else:
+            selected = select_batch_runs(args.run_dir, args.start_id, args.event)
+            print("Selected starts: " + ", ".join(start_id for start_id, _ in selected))
+            path = plot_batch(
+                args.run_dir, args.barrier_model, start_ids=args.start_id, event=args.event
+            )
     except (OSError, ValueError, KeyError) as exc:
         parser.exit(2, f"Plot error: {exc}\n")
     print(f"Trajectory plot: {path}")

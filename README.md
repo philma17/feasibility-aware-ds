@@ -79,10 +79,41 @@ checked on saved local runs. It reads `P_ideal` and `P` from `traj.npz` and show
 world coordinates in millimeters, with equal axis scaling. For the horizontal
 Worm setup, these are world x and y. The model goal is marked; the barrier
 region and its zero contour are green, and configured obstacles are red.
+The dashed model box is `domain.range` (X); both the green fill and B=0 contour
+are restricted to that box. `plotting.range` only controls the surrounding view.
+Plotting also writes `plots/barrier.json` with separate ideal-DS and TCP sample
+checks and prints the first observed B>0-inside-X and box-exit times.
 The matching `model_b.pth` can also be provisioned beside `model_f.pth`, in which
 case `--barrier-model` may be omitted. The plot records its additional barrier
 input and hash in the PNG metadata. Spatial tasks without a two-dimensional
 task plane are rejected explicitly.
+
+For a batch with `runs.csv`, select starts by repeated ID or by a saved event:
+
+```bash
+python -B -m evaluation.plots results/five_obstacle_pic_100 \
+  --start-id start_013 --start-id start_045 \
+  --barrier-model /path/to/2D_Shapes/Five_Obstacle_DS/model_b.pth
+python -B -m evaluation.plots results/five_obstacle_pic_100 --event domain_exit \
+  --barrier-model /path/to/2D_Shapes/Five_Obstacle_DS/model_b.pth
+```
+
+These commands write `plots/trajectory_selected.png` and
+`plots/trajectory_domain_exit.png` in the batch directory. Each figure overlays
+the selected starts, with one color per ID, dashed Ideal DS paths and solid
+Robot Paths. Regions, the model goal and world-coordinate axes use the existing
+single-run layout. Combined runs must share their model, robot, embedding and
+plot inputs. PNG metadata records the selected IDs and run paths.
+Batch overlays write the selected runs' checks beside the PNG as
+`trajectory_selected.barrier.json` or `trajectory_<event>.barrier.json`.
+
+Event choices are `goal_failure`, `tracking_failure`, `obstacle_entry`,
+`domain_exit`, `barrier_exit`, `torque_saturation` (saved saturated steps > 0)
+and `nonfinite` (saved finite=false). Selection reads the existing CSV without
+re-evaluating metrics or thresholds. `NA` is not selected. An unknown ID, no
+matching event, or an unavailable selected trajectory produces an error rather
+than silently omitting that run. A batch requires an explicit selection;
+single-run plotting remains unchanged.
 
 Five Obstacle and Servo configs are also available:
 `configs/five_obstacle_pic.yaml`, `configs/worm_servo.yaml`, and
@@ -95,6 +126,164 @@ To select another package, change `model` to its catalog identifier. Choose a
 start for that model; set `task.q_start_rad` to `null` to use IK rather than
 reusing another model's saved joint angles. Existing values can also be
 overridden with repeated `--set KEY=VALUE` arguments.
+
+## Run a reproducible batch
+
+Add `--runs N` to execute N uniformly drawn TCP starts from the selected model
+package's `plotting.init_range`. For example:
+
+```bash
+python -B main.py configs/worm_pic.yaml --runs 100 --output results/worm_pic_100
+```
+
+The batch uses the existing indexed start selection with `multistart.seed`
+(0 in all four nominal configurations). It sets `multistart.n_starts` to N and
+replaces the fixed single-run `q_start_rad` with the existing multistart start IK.
+`sim.seed` controls that IK search (Worm: 73; Five Obstacle: 0), and
+`sim.n_starts=32` remains the number of IK candidates per TCP start. These are
+different from the number of simulation runs.
+
+PIC and Servo use the same sampling, embedding, IK seeds, candidate count and
+selection criterion for each model. With the supplied paired configurations,
+the TCP starts and selected joint configurations therefore match. Keep those
+start/IK settings identical when overriding a paired experiment. Increasing N
+with the same seed preserves the prefix of the drawn start sequence.
+
+The output directory must be new. Each experiment writes:
+
+| Path | Content |
+| --- | --- |
+| `starts.csv` | All planned IDs, normalized starts, desired world TCP starts [m], seeds, relative run paths, selected joint angles [rad], status and error |
+| `batch_config.yaml` | Base configuration after CLI overrides |
+| `batch.json` | Batch status, planned/completed counts, command, input hashes and final start-list hash |
+| `start_000/`, `start_001/`, ... | Existing single-run output format, including effective per-start configuration and actual initial joint angles |
+| `runs.csv`, `summary.md`, `barrier.json` | Automatically aggregated per-start table, descriptive summary and optional Barrier checks |
+
+The entire start list is saved before execution. A failed start IK is recorded
+in that start's manifest and does not remove the row or stop later starts.
+After an interruption, aggregation still includes incomplete and unattempted
+starts. Technical errors make the batch exit nonzero; task failure remains a
+separate CSV flag. No tracking threshold is added, and unevaluated Barrier exits
+remain `NA`. There is no automatic trajectory plotting. `--check` remains a
+single-start check and cannot be combined with `--runs`.
+
+The four nominal 100-start commands are:
+
+```bash
+python -B main.py configs/five_obstacle_pic.yaml --runs 100 --output results/five_obstacle_pic_100
+python -B main.py configs/five_obstacle_servo.yaml --runs 100 --output results/five_obstacle_servo_100
+python -B main.py configs/worm_pic.yaml --runs 100 --output results/worm_pic_100
+python -B main.py configs/worm_servo.yaml --runs 100 --output results/worm_servo_100
+```
+
+Each command writes its table directly under its output directory, for example
+`results/worm_pic_100/runs.csv`. These 100-start commands are for manual execution.
+
+## Aggregate saved runs
+
+Create one table from existing run directories without simulating or plotting:
+
+```bash
+python -B -m evaluation.aggregate results
+```
+
+This writes `results/runs.csv`, `results/summary.md` and `results/barrier.json`.
+To summarize only one saved run:
+
+```bash
+python -B -m evaluation.aggregate results/worm_pic_verified
+```
+
+This writes `results/worm_pic_verified/runs.csv` with one row and the same
+columns, plus `summary.md` beside it. An input directory containing `manifest.json` is always treated as
+a single run; nested run directories and start lists are not consulted.
+
+For a batch, if `results/starts.csv` exists, it determines
+the rows, including missing runs. Otherwise, run directories are discovered
+recursively using their saved artifacts. An explicit plan can be supplied with
+`--starts /path/to/starts.csv`; its minimum format is:
+
+```csv
+start_id,run_dir
+worm_pic_000,worm_pic_verified
+five_pic_000,five_obstacle_pic
+```
+
+Run paths are relative to the batch directory. Start IDs and resolved run paths
+must be unique within the plan. The plan is authoritative: unlisted directories
+are not added to its table. Without a plan, the relative directory path is used
+as the start ID. Failed, incomplete, missing and malformed cases remain visible.
+
+The CSV copies the saved metric definitions and units. Technical `status` and
+`metrics_status` are separate from `goal_failure`, `tracking_failure` and
+`obstacle_entry`. Task decisions require a complete run without a recorded
+nonfinite-state flag. Goal failure uses the saved `success` criterion by default;
+the goal radius, when available, is recorded from the saved configuration and
+effective embedding. Obstacle entry means signed clearance <= 0, including the
+unsafe boundary. The CSV's legacy `barrier_exit` flag is copied only when present
+in saved metrics; the new ideal/TCP sampled checks are stored separately in
+`barrier.json` and `summary.md`, so CSV columns and metric units are preserved.
+Unavailable CSV values are the literal `NA`, distinct from `false` and zero.
+
+`summary.md` gives one compact row per model/robot/controller with common valid n
+and mean ± sample SD (n−1) for DS–TCP MSE [mm²], DTW [mm] and maximum geometric
+deviation [mm]. The summary multiplies saved MSE by 10^6 and distances by 10^3;
+the CSV retains m² and m. Valid n requires a complete run, finite=true and all
+three metrics. Minimum and maximum with all tied start IDs use that same
+population. Observed absolute torque [N·m], applied torque as a percentage of the
+joint limit, and acceleration [rad/s²] are reported separately. Their peaks use
+executed intervals, exclude terminal padding and may include partial observations.
+
+Event counts include their evaluated denominator, unknown count and affected IDs.
+The summary uses the same saved flags and explicit evaluation thresholds as the
+table. The no-event marker is `keine`; a missing check is `NA`. Runs with logged
+absolute joint-acceleration peaks strictly above 10 rad/s² are listed as exceeding
+the FR3 acceleration reference in simulation. This is separate from technical run
+status, task failure and a hardware safety assessment. Applied torque ratio and
+commanded-torque saturation remain separate quantities.
+
+Evaluate the trusted local Barrier checkpoint explicitly:
+
+```bash
+python -B -m evaluation.aggregate results/five_obstacle_pic_100 \
+  --barrier-model /path/to/2D_Shapes/Five_Obstacle_DS/model_b.pth
+```
+
+The checkpoint's sibling `model_f.pth` must match the saved run, and configuration,
+metadata and trajectory hashes are verified. The source float32 Barrier network
+is evaluated at the saved ideal-DS and TCP world positions, transformed back with
+each run's effective embedding. X is the closed `domain.range` box. Strict B>0
+samples inside X and samples outside X are counted separately for each trajectory.
+The summary lists affected IDs and the earliest logged event time across runs;
+`barrier.json` retains per-run counts, first times, model/domain provenance and
+input hashes. These are sampled checks, without crossing-time interpolation or
+continuous-time guarantees. Without `--barrier-model`, the new checks are `NA`.
+
+Aggregation never creates trajectory plots. With `--output`, `summary.md` and
+`barrier.json` are written beside the selected CSV path. Raw runs and their saved
+`metrics.json` are unchanged.
+
+Optional evaluation overrides are supplied with `--evaluation evaluation.yaml`:
+
+```yaml
+goal_threshold_m: 0.001
+tracking_thresholds:
+  max_err_sync_m: 0.01
+  geom_dev_max_m: 0.002
+```
+
+These are example thresholds, not defaults. A goal override retains the strict
+final-distance < radius test and recomputes first goal entry from saved samples;
+without those samples, the entry time stays unavailable. Tracking failure is
+evaluated only for supplied thresholds: any strict exceedance fails; passing
+requires all configured metric values to be available. Other accepted tracking
+keys are `mse_sync_m2` (m²) and `dtw_mean_m` (m); the two keys above are in meters.
+
+`peak_abs_qacc_rad_s2` is max absolute logged joint acceleration over all joints
+and executed intervals. The PIC terminal padding row is excluded; `qacc_intervals`
+records the sample count. Servo runs without `qacc` report `NA`/`not_logged`;
+acceleration is not estimated by differentiating another channel. Other input
+problems appear in `notes`. `--output` can select another CSV destination.
 
 ## Controller interface
 

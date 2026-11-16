@@ -1,4 +1,4 @@
-"""Run one configured learned-DS experiment and save its raw MuJoCo trajectory."""
+"""Run configured learned-DS experiments and save raw MuJoCo trajectories."""
 
 from __future__ import annotations
 
@@ -155,55 +155,13 @@ def list_models(catalog):
         print(f"{name}: " + (f"missing local inputs: {missing}" if missing else "available"))
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("config", nargs="?", help="experiment YAML path")
-    parser.add_argument(
-        "--output", type=Path, help="new output directory; existing paths are refused"
-    )
-    parser.add_argument(
-        "--set",
-        action="append",
-        default=[],
-        metavar="KEY=VALUE",
-        help="override an existing configuration key (repeatable)",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="verify assets and build the initial state without stepping",
-    )
-    parser.add_argument(
-        "--list-models",
-        action="store_true",
-        help="list supported packages and local input availability",
-    )
-    args = parser.parse_args(argv)
-    if args.list_models:
-        list_models("configs/models.yaml")
-        return 0
-    if not args.config:
-        parser.error("a configuration is required unless --list-models is used")
-    try:
-        cfg = load_config(args.config, args.set)
-        hashes = input_hashes(cfg)
-        from sim.controllers import pic, servo
+def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None):
+    """Execute the existing single-run path; batches call the same writer and controller."""
+    from sim.controllers import pic, servo
 
-        controller = {"pic": pic, "servo": servo}[cfg["controller"]]
-        pic.PICParams.from_cfg(cfg["pic"])
-        if args.check:
-            case = build_case(cfg)
-            print(f"Ready: {cfg['model']} / {cfg['robot']} / {cfg['controller']}")
-            print(f"Start FK error: {case.ik.pos_err:.9g} m; no simulation steps executed")
-            for warning in case.scenario["warnings"]:
-                print(f"Scenario warning: {warning}")
-            return 0
-    except (ValueError, KeyError, TypeError, FileNotFoundError, NotImplementedError) as exc:
-        print(f"Configuration error: {exc}", file=sys.stderr)
-        return 2
-
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    output = args.output or ROOT / "results" / f"{stamp}_{cfg['controller']}_{uuid4().hex[:8]}"
+    output = Path(output)
+    hashes = input_hashes(cfg) if hashes is None else hashes
+    controller = {"pic": pic, "servo": servo}[cfg["controller"]]
     try:
         output.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
@@ -218,7 +176,7 @@ def main(argv=None):
         "robot": cfg["robot"],
         "seed": cfg["sim"]["seed"],
         "git": git_state(),
-        "command_line": sys.argv if argv is None else list(argv),
+        "command_line": list(sys.argv if command_line is None else command_line),
         "python": platform.python_version(),
         "versions": {
             name: version(name)
@@ -232,10 +190,13 @@ def main(argv=None):
         },
         "config_sha256": hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest(),
     }
+    if start_id is not None:
+        manifest["start_id"] = start_id
     manifest["implementation_sha256"]["main.py"] = sha256(ROOT / "main.py")
     write_json(output / "manifest.json", manifest)
     (output / "config_resolved.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
     started = time.perf_counter()
+    stage = "start_ik"
     try:
         case = build_case(cfg)
         manifest.update(
@@ -261,9 +222,11 @@ def main(argv=None):
             f"{case.sp.T_max:g} s at dt={case.sp.dt:g} s",
             flush=True,
         )
+        stage = "simulation"
         result = controller.run(case)
         np.savez_compressed(output / "traj.npz", **result["traj"])
         write_json(output / "controller.json", {k: v for k, v in result.items() if k != "traj"})
+        stage = "evaluation"
         metrics = summarize(result, case)
         write_json(output / "metrics.json", metrics)
         manifest.update(
@@ -279,6 +242,7 @@ def main(argv=None):
         manifest.update(
             status="incomplete" if isinstance(exc, KeyboardInterrupt) else "error",
             error=f"{type(exc).__name__}: {exc}",
+            failure_stage=stage,
             wall_time_s=time.perf_counter() - started,
         )
         write_json(output / "manifest.json", manifest)
@@ -293,6 +257,78 @@ def main(argv=None):
     )
     print(f"MSE: {metrics['mse_sync_m2']:.9g} m^2; DTW: {metrics['dtw_mean_m']:.9g} m")
     return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("config", nargs="?", help="experiment YAML path")
+    parser.add_argument(
+        "--output", type=Path, help="new output directory; existing paths are refused"
+    )
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override an existing configuration key (repeatable)",
+    )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        help="batch size; uniform plotting.init_range starts using multistart.seed",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="verify assets and build the initial state without stepping",
+    )
+    parser.add_argument(
+        "--list-models",
+        action="store_true",
+        help="list supported packages and local input availability",
+    )
+    args = parser.parse_args(argv)
+    if args.runs is not None:
+        if args.runs < 1:
+            parser.error("--runs must be a positive integer")
+        if args.check:
+            parser.error("--runs and --check cannot be combined")
+    if args.list_models:
+        list_models("configs/models.yaml")
+        return 0
+    if not args.config:
+        parser.error("a configuration is required unless --list-models is used")
+    try:
+        cfg = load_config(args.config, args.set)
+        hashes = input_hashes(cfg)
+        from sim.controllers import pic
+
+        pic.PICParams.from_cfg(cfg["pic"])
+        if args.check:
+            case = build_case(cfg)
+            print(f"Ready: {cfg['model']} / {cfg['robot']} / {cfg['controller']}")
+            print(f"Start FK error: {case.ik.pos_err:.9g} m; no simulation steps executed")
+            for warning in case.scenario["warnings"]:
+                print(f"Scenario warning: {warning}")
+            return 0
+    except (ValueError, KeyError, TypeError, FileNotFoundError, NotImplementedError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        return 2
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    output = args.output or ROOT / "results" / f"{stamp}_{cfg['controller']}_{uuid4().hex[:8]}"
+    command_line = list(sys.argv if argv is None else argv)
+    if args.runs is not None:
+        from sim.batch import run_batch
+
+        try:
+            return run_batch(
+                cfg, output, args.runs, run_single, hashes=hashes, command_line=command_line
+            )
+        except (ValueError, KeyError, TypeError, FileNotFoundError, NotImplementedError) as exc:
+            print(f"Batch configuration error: {exc}", file=sys.stderr)
+            return 2
+    return run_single(cfg, output, hashes=hashes, command_line=command_line)
 
 
 if __name__ == "__main__":

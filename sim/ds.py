@@ -281,6 +281,14 @@ SPATIAL_DEFAULT = {
 MULTISTART_DEFAULT = {"seed": 0, "n_starts": 20}
 
 
+def sample_starts(box, seed, n_starts):
+    """Draw the source uniform start set; prefixes are stable when the count changes."""
+    box = np.asarray(box, float)
+    return np.random.default_rng(int(seed)).uniform(
+        box[:, 0], box[:, 1], size=(int(n_starts), len(box))
+    )
+
+
 def load_scenario(cfg: dict) -> dict:
     package = model_catalog(cfg["model_catalog"])[cfg["model"]]
     if not package["selectable"]:
@@ -316,9 +324,7 @@ def load_scenario(cfg: dict) -> dict:
                 f"no init_range for {dataset}/{shape} in {s2_path}; cannot draw a verified start set"
             )
         ms = {**MULTISTART_DEFAULT, **(cfg.get("multistart") or {})}
-        X0 = np.random.default_rng(int(ms["seed"])).uniform(
-            box[:, 0], box[:, 1], size=(int(ms["n_starts"]), dim)
-        )
+        X0 = sample_starts(box, ms["seed"], ms["n_starts"])
         i = int(start["index"])
         if not 0 <= i < len(X0):
             raise ValueError(f"task.start.index must be in 0..{len(X0) - 1}")
