@@ -1,6 +1,8 @@
 # Nominal FR3/Five Obstacle; source benchmark start and gains.
 model_source: pth
-time_rate: demo
+# Use dx_n/dt = f_n(x_n); ps and vs remain model-normalization metadata.
+time_rate: 1.0
+ds_speed_factor: 1.0
 robot: FR3
 sim:
   dt: 0.001

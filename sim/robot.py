@@ -1,7 +1,7 @@
-"""FR3 kinematics, physical parameters, gravity, actuator mapping, and IK."""
+"""Registered arm models, kinematics, physical parameters, actuator mapping, and IK."""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import mujoco
 import numpy as np
@@ -29,6 +29,9 @@ class RobotSpec:
     qd_max: tuple
     sources: dict = field(default_factory=dict)
     caveats: tuple = ()
+    family: str = ""
+    fixed_joints: tuple = ()  # (original joint name, fixed angle [rad]); absent from q.
+    acceleration_reference_rad_s2: float | None = None
 
 
 FR3 = RobotSpec(
@@ -41,8 +44,48 @@ FR3 = RobotSpec(
     (2.62, 2.62, 2.62, 2.62, 5.26, 4.18, 5.26),
     sources={"limits": "franka_description robots/fr3/joint_limits.yaml"},
     caveats=("Constant velocity limits omit the source position-dependent limits.",),
+    family="FR3",
+    acceleration_reference_rad_s2=10.0,
 )
-ROBOTS = {"FR3": FR3}
+
+
+def _fr3_variant(name, filename, locked):
+    """Keep physical references in original joint order after removing fixed joints."""
+    indices = [i for i, joint in enumerate(FR3.joints) if joint not in locked]
+    TAU_MAX_DOC[name] = (TAU_MAX_DOC["FR3"][0][indices], TAU_MAX_DOC["FR3"][1])
+    return replace(
+        FR3, name=name, mjcf=f"franka_fr3/{filename}",
+        joints=tuple(FR3.joints[i] for i in indices),
+        q_min_doc=tuple(FR3.q_min_doc[i] for i in indices),
+        q_max_doc=tuple(FR3.q_max_doc[i] for i in indices),
+        qd_max=tuple(FR3.qd_max[i] for i in indices),
+        fixed_joints=tuple((joint, 0.0) for joint in locked),
+    )
+
+
+FR3_FIXED_J5 = _fr3_variant("FR3_fixed_J5", "fr3_fixed_j5.xml", ("fr3_joint5",))
+FR3_FIXED_J3 = _fr3_variant("FR3_fixed_J3", "fr3_fixed_j3.xml", ("fr3_joint3",))
+FR3_FIXED_J3_J5 = _fr3_variant(
+    "FR3_fixed_J3_J5", "fr3_fixed_j3_j5.xml", ("fr3_joint3", "fr3_joint5")
+)
+UR5E = RobotSpec(
+    "UR5e", "universal_robots_ur5e/ur5e.xml",
+    ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+     "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"),
+    "attachment_site",
+    (-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi),
+    (2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi),
+    (np.pi,) * 6,
+    sources={
+        "limits": "UniversalRobots/Universal_Robots_ROS2_Description/config/ur5e/joint_limits.yaml",
+        "effort": "Menagerie ur5e.xml actuator forcerange: 150/150/150/28/28/28 N m",
+    },
+    caveats=("MJCF position limits are rounded; elbow limited to approximately +/- pi.",
+             "No acceleration reference configured; native MJCF has no joint frictionloss."),
+    family="UR5e",
+)
+TAU_MAX_DOC["UR5e"] = (np.array([150., 150., 150., 28., 28., 28.]), UR5E.sources["effort"])
+ROBOTS = {spec.name: spec for spec in (FR3, FR3_FIXED_J5, FR3_FIXED_J3, FR3_FIXED_J3_J5, UR5E)}
 
 
 def _quat_z_to(a: np.ndarray) -> np.ndarray:
@@ -511,14 +554,15 @@ def resolve_plant(plant: dict | None) -> dict:
 
 
 def synthetic_frictionloss(robot_name: str, mode: str) -> np.ndarray:
-    """Synthetic joint Coulomb friction for a robot whose MJCF has none (see module docstring)."""
-    ref = FR3_REF[1]
-    n = len(TAU_MAX_DOC[robot_name][0])
-    if n > len(ref):
-        raise ValueError("more joints than the FR3 reference")
+    """Explicit FR3-only diagnostic reference, indexed by original joint names."""
+    spec = ROBOTS[robot_name]
+    if spec.family != "FR3":
+        raise ValueError("FR3 synthetic friction is not defined for this robot")
+    indices = [FR3.joints.index(joint) for joint in spec.joints]
+    ref = FR3_REF[1][indices]
     if mode == "absolute":
-        return ref[:n].copy()
-    return ref[:n] / TAU_MAX_DOC["FR3"][0][:n] * TAU_MAX_DOC[robot_name][0]
+        return ref.copy()
+    return ref / TAU_MAX_DOC["FR3"][0][indices] * TAU_MAX_DOC[robot_name][0]
 
 
 def torque_limit(robot_name: str, scale: float) -> np.ndarray:
@@ -532,11 +576,9 @@ def apply_plant(robot, plant: dict | None) -> dict:
     nominal = {"gravity": m.opt.gravity.copy()}
     syn = None
     if np.all(m.dof_frictionloss[robot.dadr] == 0.0):
-        syn = p["synthetic_friction"] or "relative"
-        if syn != "none" and robot.spec.name != "FR3":
+        syn = p["synthetic_friction"] or "none"
+        if syn != "none":
             m.dof_frictionloss[robot.dadr] = synthetic_frictionloss(robot.spec.name, syn)
-        else:
-            syn = "none" if robot.spec.name != "FR3" else None
     elif p["synthetic_friction"] not in (None, "none"):
         raise ValueError(
             f"{robot.spec.name} MJCF already has joint friction; synthetic_friction would overwrite a real model value"

@@ -465,6 +465,7 @@ def _run_source(
     dW = W[1:] - W[:-1] - S["P_ext"][:-1] * dt
     res = {
         "robot": robot.spec.name,
+        "joint_names": list(robot.spec.joints),
         "controller": "PIC-DS",
         "mode": "pos",
         "n_steps": N,

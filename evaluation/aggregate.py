@@ -13,6 +13,8 @@ from zipfile import BadZipFile
 import numpy as np
 import yaml
 
+from sim.robot import ROBOTS
+
 METRICS = (
     "final_distance_m",
     "t_reach_s",
@@ -469,7 +471,11 @@ def write_summary(path, rows, barrier_reports=None):
         count = str(len(affected)) if evaluated else "NA"
         lines.append(f"| `{event}` | {count} | {evaluated} | {len(rows) - evaluated} | "
                      f"{ids(affected, bool(evaluated))} |")
-    accelerations = finite_pairs(rows, "peak_abs_qacc_rad_s2")
+    # The FR3 reference is not a generic arm limit. UR5e peaks stay observable
+    # in the peak table above, but have no acceleration-reference verdict.
+    fr3_rows = [row for row in rows if row.get("robot") in ROBOTS
+                and ROBOTS[row["robot"]].acceleration_reference_rad_s2 == 10.0]
+    accelerations = finite_pairs(fr3_rows, "peak_abs_qacc_rad_s2")
     exceeded = [start_id for start_id, value in accelerations if value > 10]
     lines += [f"| FR3 acceleration reference exceeded in simulation (>10 rad/s²) | "
               f"{len(exceeded) if accelerations else 'NA'} | {len(accelerations)} | "
@@ -477,7 +483,8 @@ def write_summary(path, rows, barrier_reports=None):
               "Obstacle entry: clearance ≤ 0. Box exit: saved domain_exit. "
               "Torque saturation: saved torque_saturation_steps > 0. "
               "The 10 rad/s² acceleration reference is a simulation diagnostic, "
-              "not a hardware safety verdict.", "",
+              "not a hardware safety verdict; it applies only to the FR3 family. "
+              "UR5e and unknown robots have no configured acceleration reference (NA).", "",
               "| Trajectory | Event | Runs | Evaluated | NA | Samples | Affected start IDs | First sample |",
               "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |"]
     evaluated = [report for report in (barrier_reports or []) if report["status"] == "evaluated"]

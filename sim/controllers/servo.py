@@ -164,6 +164,7 @@ def _run_source(
     }
     res = {
         "robot": robot.spec.name,
+        "joint_names": list(robot.spec.joints),
         "mode": tgt.mode,
         "execution": "dynamic",
         "control_interface": "MuJoCo joint position servo (ctrl = q_des), tau = kp (ctrl - q) - kv q_dot",

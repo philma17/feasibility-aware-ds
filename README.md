@@ -5,11 +5,79 @@ systems can be executed by simulated robots while respecting joint and torque
 limits and avoiding obstacles. The aim is to evaluate tracking error and
 execution feasibility in MuJoCo.
 
-The checkout runs the **Franka Research 3 (FR3)** in MuJoCo through a common
+The checkout runs **FR3, fixed-joint FR3 variants, and UR5e** in MuJoCo through a common
 entry point with separate **PIC joint-torque** and **position-servo** modules.
 Configuration selects the learned model, controller, task start, planar or
 spatial embedding, simulation parameters, and physical plant settings.
 Start positions can use saved joint angles or the existing multistart IK.
+
+Both Five Obstacle configurations use `time_rate: 1.0` and `ds_speed_factor: 1.0`:
+the normalized dynamics are `dx_n/dt = f_n(x_n)`, and the embedded DS velocity is
+`L_m * E @ f_n(x_n)`. Position normalization and the `ps`/`vs` metadata are
+retained. Older Five Obstacle results used `time_rate: demo` (`vs/ps`); their
+time-synchronized references differ. Worm retains demonstration timing.
+
+## Robot models
+
+Select a model with `robot` in the experiment configuration or `--set robot=NAME`.
+The TCP is each model's native `attachment_site`, without an added tool offset.
+
+| Configuration name | Moving arm axes | Fixed joints | MJCF (relative to repository root) |
+| --- | ---: | --- | --- |
+| `FR3` | 7 | none | `vendor/franka_fr3/fr3.xml` |
+| `FR3_fixed_J5` | 6 | J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j5.xml` |
+| `FR3_fixed_J3` | 6 | J3 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3.xml` |
+| `FR3_fixed_J3_J5` | 5 | J3 = J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j5.xml` |
+| `UR5e` | 6 | none | `vendor/universal_robots_ur5e/ur5e.xml` |
+
+The FR3 variants share `vendor/franka_fr3/assets/`. Fixed angles are the midpoints
+of the original MJCF joint ranges. At these zero angles the original body
+transforms already represent the fixed posture. The corresponding joint and
+actuator elements are removed and keyframes shortened; links, inertias and TCP
+are retained. IK, PIC and Servo therefore operate on only the remaining joints.
+Original joint names are preserved: `fr3_joint7` remains J7 even in the five-axis
+model. `manifest.json:robot_model.joint_names` gives the column order of joint
+arrays; `controller.json` also records these names. `robot_model` records the
+fixed joints, limits, TCP and acceleration reference.
+
+FR3 effort limits are selected by original joint name. UR5e uses its Menagerie
+actuator limits (150/150/150/28/28/28 N·m), velocity limits of pi rad/s, and native
+MJCF friction. No synthetic FR3 friction or FR3 acceleration-reference verdict
+is applied to UR5e; observed acceleration peaks, if logged, are still reported.
+Model provenance, licenses and local transformations are documented in the
+respective vendor `SOURCE.txt` files and the asset manifest.
+
+Check a different model through the normal initial-state path:
+
+```bash
+python -B main.py configs/five_obstacle_pic.yaml \
+  --set robot=FR3_fixed_J3_J5 --set task.q_start_rad=null --check
+```
+
+Set `task.q_start_rad=null` when switching robots to solve the start IK. Saved
+joint vectors must otherwise match the chosen model's active joint order.
+Batch execution already clears the fixed single-run joint vector before IK.
+Different robots solve their own joint vectors; paired PIC/Servo runs of the
+same robot use the same deterministic start IK.
+
+For comparable Five Obstacle/PIC batches, retain the supplied embedding, time
+rate, `multistart.seed=0` and nominal DS speed. These commands draw the same 100
+TCP starts as the existing nominal batch; each model solves its own start IK:
+
+```bash
+python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3 --runs 100 --output results/five_obstacle_pic_fr3_100
+python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J5 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j5_100
+python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J3 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j3_100
+python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J3_J5 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j3_j5_100
+python -B main.py configs/five_obstacle_pic.yaml --set robot=UR5e --runs 100 --output results/five_obstacle_pic_ur5e_100
+```
+
+Each output contains `starts.csv`, `start_NNN/`, `runs.csv` and `summary.md`.
+An unsolved IK or failed run remains in both tables. Output directories must be
+new. For position-servo comparisons use `configs/five_obstacle_servo.yaml` with
+the same robot and sampling settings, and a separate output directory.
+Only short single-run and two-start batch checks are automated for these robot
+variants; the 100-start commands are provided for manual execution.
 
 The local model catalog, [configs/models.yaml](configs/models.yaml), contains
 these packages supported by the source loaders:
@@ -236,9 +304,10 @@ executed intervals, exclude terminal padding and may include partial observation
 
 Event counts include their evaluated denominator, unknown count and affected IDs.
 The summary uses the same saved flags and explicit evaluation thresholds as the
-table. The no-event marker is `keine`; a missing check is `NA`. Runs with logged
+table. The no-event marker is `keine`; a missing check is `NA`. FR3-family runs with logged
 absolute joint-acceleration peaks strictly above 10 rad/s² are listed as exceeding
-the FR3 acceleration reference in simulation. This is separate from technical run
+the FR3 acceleration reference in simulation. UR5e has no configured acceleration
+reference and receives `NA` for this check. This is separate from technical run
 status, task failure and a hardware safety assessment. Applied torque ratio and
 commanded-torque saturation remain separate quantities.
 
@@ -310,4 +379,5 @@ not establish a safety or discrete-time passivity guarantee.
 Input paths and hashes are recorded in [asset_manifest.json](asset_manifest.json).
 Third-party source notices are in [vendor/S2NNDS](vendor/S2NNDS/SOURCE.txt) and
 [vendor/franka_fr3](vendor/franka_fr3/SOURCE.txt), alongside the
-[FR3 asset license](vendor/franka_fr3/LICENSE).
+[FR3 asset license](vendor/franka_fr3/LICENSE). UR5e provenance and license are
+in [vendor/universal_robots_ur5e](vendor/universal_robots_ur5e/SOURCE.txt).

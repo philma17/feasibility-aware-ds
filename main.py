@@ -22,6 +22,7 @@ import yaml
 from evaluation.metrics import summarize
 from sim.ds import ROOT, input_path, model_catalog
 from sim.sim import build_case
+from sim.robot import MENAGERIE_DIR, ROBOTS
 
 
 def jsonable(value):
@@ -116,9 +117,11 @@ def input_hashes(cfg):
         "asset_manifest.json",
         "vendor/S2NNDS/NNModels.py",
     ]
+    spec = ROBOTS[cfg["robot"]]
+    asset_dir = Path(MENAGERIE_DIR) / Path(spec.mjcf).parent
     files += [
         str(p.relative_to(ROOT))
-        for p in sorted((ROOT / "vendor/franka_fr3").rglob("*"))
+        for p in sorted(asset_dir.rglob("*"))
         if p.is_file()
     ]
     expected = {
@@ -200,6 +203,17 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None):
     try:
         case = build_case(cfg)
         manifest.update(
+            robot_model={
+                "mjcf": str(Path("vendor") / case.robot.spec.mjcf),
+                "joint_names": list(case.robot.spec.joints),
+                "fixed_joints_rad": dict(case.robot.spec.fixed_joints),
+                "tcp_site": case.robot.spec.site,
+                "arm_dof": case.robot.n,
+                "q_min_rad": case.robot.q_min.tolist(),
+                "q_max_rad": case.robot.q_max.tolist(),
+                "qd_max_rad_s": case.robot.qd_max.tolist(),
+                "acceleration_reference_rad_s2": case.robot.spec.acceleration_reference_rad_s2,
+            },
             q_start_rad=case.q_start.tolist(),
             x0_n=case.x0_n.tolist(),
             plant=case.plant_report,

@@ -13,3 +13,14 @@ FR3 files match d7b481b. This migration has not independently resolved the
 upstream revision. The exact copied-file hashes are in asset_manifest.json.
 
 License: Apache-2.0; see LICENSE.
+
+Local fixed-joint variants (2026-11-16):
+fr3_fixed_j5.xml: J5 removed; fr3_fixed_j3.xml: J3 removed;
+fr3_fixed_j3_j5.xml: J3 and J5 removed. All use the same assets/ directory.
+For each removed joint the fixed angle is (lower + upper)/2 from fr3.xml:
+J3: (-2.9007 + 2.9007)/2 = 0 rad; J5: (-2.8763 + 2.8763)/2 = 0 rad.
+At zero angle the existing body-to-parent transform is already the fixed
+transform; it is retained verbatim, as are all bodies, inertials, geoms and TCP.
+Only the named joint and its actuator are removed; qpos/ctrl keyframe entries
+are filtered in original joint order. No equality constraints or soft locks.
+Original fr3.xml and shared meshes remain byte-identical to the source.
