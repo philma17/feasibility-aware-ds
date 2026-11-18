@@ -6,6 +6,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
+from .fr3_variants import FIXED_VARIANTS, MASS_VARIANTS
 
 MENAGERIE_DIR = str(Path(__file__).resolve().parents[1] / "vendor")
 TASK_DIMS = {"pos": 3, "axis5": 5, "full6": 6}
@@ -59,7 +60,11 @@ def _fr3_variant(name, filename, locked):
         q_min_doc=tuple(FR3.q_min_doc[i] for i in indices),
         q_max_doc=tuple(FR3.q_max_doc[i] for i in indices),
         qd_max=tuple(FR3.qd_max[i] for i in indices),
-        fixed_joints=tuple((joint, 0.0) for joint in locked),
+        fixed_joints=tuple(
+            (joint, (FR3.q_min_doc[FR3.joints.index(joint)] +
+                     FR3.q_max_doc[FR3.joints.index(joint)]) / 2)
+            for joint in locked
+        ),
     )
 
 
@@ -86,6 +91,14 @@ UR5E = RobotSpec(
 )
 TAU_MAX_DOC["UR5e"] = (np.array([150., 150., 150., 28., 28., 28.]), UR5E.sources["effort"])
 ROBOTS = {spec.name: spec for spec in (FR3, FR3_FIXED_J5, FR3_FIXED_J3, FR3_FIXED_J3_J5, UR5E)}
+ROBOTS.update({
+    name: _fr3_variant(name, filename, tuple(f"fr3_joint{i}" for i in locked))
+    for name, (filename, locked) in FIXED_VARIANTS.items()
+})
+ROBOTS.update({
+    name: _fr3_variant(name, filename, ())
+    for name, (filename, _link, _factor) in MASS_VARIANTS.items()
+})
 
 
 def _quat_z_to(a: np.ndarray) -> np.ndarray:

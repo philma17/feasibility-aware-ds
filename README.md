@@ -28,15 +28,19 @@ The TCP is each model's native `attachment_site`, without an added tool offset.
 | `FR3_fixed_J5` | 6 | J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j5.xml` |
 | `FR3_fixed_J3` | 6 | J3 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3.xml` |
 | `FR3_fixed_J3_J5` | 5 | J3 = J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j5.xml` |
+| `FR3_fixed_J3_J7` | 5 | J3 = J7 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j7.xml` |
+| `FR3_fixed_J3_J5_J7` | 4 | J3 = J5 = J7 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j5_j7.xml` |
+| `FR3_fixed_J3_J5_J6_J7` | 3 | J3 = J5 = J7 = 0; J6 = 2.5307 rad | `vendor/franka_fr3/fr3_fixed_j3_j5_j6_j7.xml` |
 | `UR5e` | 6 | none | `vendor/universal_robots_ur5e/ur5e.xml` |
 
 The FR3 variants share `vendor/franka_fr3/assets/`. Fixed angles are the midpoints
-of the original MJCF joint ranges. At these zero angles the original body
-transforms already represent the fixed posture. The corresponding joint and
+of the original MJCF joint ranges. Zero locks retain the original body
+transforms. The nonzero J6 lock is baked into its relative body transform
+before removing the hinge. The corresponding joint and
 actuator elements are removed and keyframes shortened; links, inertias and TCP
 are retained. IK, PIC and Servo therefore operate on only the remaining joints.
-Original joint names are preserved: `fr3_joint7` remains J7 even in the five-axis
-model. `manifest.json:robot_model.joint_names` gives the column order of joint
+Original joint names are preserved, including gaps after removing joints.
+`manifest.json:robot_model.joint_names` gives the column order of joint
 arrays; `controller.json` also records these names. `robot_model` records the
 fixed joints, limits, TCP and acceleration reference.
 
@@ -78,6 +82,22 @@ new. For position-servo comparisons use `configs/five_obstacle_servo.yaml` with
 the same robot and sampling settings, and a separate output directory.
 Only short single-run and two-start batch checks are automated for these robot
 variants; the 100-start commands are provided for manual execution.
+
+Independent full-7-DoF density variants are selected as `FR3_link3_mass_150pct`,
+`FR3_link3_mass_200pct`, `FR3_link7_mass_150pct`, and `FR3_link7_mass_200pct`.
+Each scales one link's inertial mass and all three principal inertias by 1.5 or
+2, retaining its COM frame and geometry. Simulation and nominal gravity
+compensation both load the selected MJCF; `plant.mass_scale: 1.0` and
+`pic.gravity_comp: nominal` are retained. PIC gains are unchanged.
+
+The separate [FR3 experiment guide](docs/fr3_experiments.md) lists the concrete
+`configs/dof/` and `configs/mass/` configurations, all 100-start commands,
+the common-pose gravity vectors and their per-joint changes. Reproduce them with:
+
+```bash
+python -B -m evaluation.compare_fr3_mass --output results/fr3_mass_comparison.json
+python -B -m sim.fr3_variants --check
+```
 
 The local model catalog, [configs/models.yaml](configs/models.yaml), contains
 these packages supported by the source loaders:

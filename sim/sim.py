@@ -6,6 +6,7 @@ from typing import Callable, TypeVar
 import mujoco
 import numpy as np
 from .ds import load_scenario
+from .fr3_variants import MASS_VARIANTS
 from .robot import (
     Robot,
     ROBOTS,
@@ -146,11 +147,18 @@ def build_case(
             True,
         )
     else:
+        # MuJoCo's COM-based Jacobian computation can change by roundoff after
+        # a density change. Use the identical reference model for start IK so
+        # paired density experiments retain exactly the same initial angles.
+        ik_robot = robot
+        if name in MASS_VARIANTS:
+            ik_robot = Robot(ROBOTS["FR3"])
+            apply_plant(ik_robot, plant)
         ikr = multistart_ik(
-            robot,
+            ik_robot,
             p0,
             tgt,
-            robot.q_home,
+            ik_robot.q_home,
             sp.n_starts,
             sp.seed,
             sp.start_criterion,
