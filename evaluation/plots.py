@@ -16,9 +16,10 @@ from matplotlib.patches import Patch, Polygon
 import numpy as np
 
 from evaluation.metrics import UnsafeSet
+from evaluation.run_artifacts import read_trajectory
 from evaluation.barrier import (
     barrier_values, domain_box, evaluate_run, file_sha256, model_to_world,
-    resolve_barrier_model, saved_model_inputs,
+    recorded_model_hashes, resolve_barrier_model, saved_model_inputs, world_to_model,
 )
 from evaluation.aggregate import EVENTS, event_value
 
@@ -160,20 +161,23 @@ def load_plot_run(run_dir, barrier_model=None, start_id=None):
     run_dir = Path(run_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     cfg, package, spec = saved_model_inputs(run_dir, manifest)
+    # Older TCP manifests record identity in the effective configuration.
+    manifest = {**{name: cfg.get(name) for name in ("model", "robot", "controller")}, **manifest}
     emb = manifest["embedding"]
     displayed_axes = world_axes(emb)
-    with np.load(run_dir / "traj.npz", allow_pickle=False) as arrays:
-        measured_world, ideal_world = arrays["P"], arrays["P_ideal"]
+    arrays = read_trajectory(run_dir, manifest)
+    measured_world, ideal_world = arrays["P"], arrays["P_ideal"]
     # Validate both arrays before drawing or combining several saved runs.
     task_plane_mm(measured_world, emb)
     task_plane_mm(ideal_world, emb)
+    hashes, _ = recorded_model_hashes(run_dir, manifest)
     plot_inputs = {
         "world_axes": displayed_axes,
         "metadata": package["metadata"],
-        "metadata_sha256": manifest["input_sha256"][package["metadata"]],
+        "metadata_sha256": hashes[package["metadata"]],
     }
     if spec.get("Barrier", False):
-        barrier_model = resolve_barrier_model(package, manifest, barrier_model)
+        barrier_model = resolve_barrier_model(package, manifest, barrier_model, run_dir=run_dir)
         plot_inputs.update(
             barrier_model=str(barrier_model.resolve()), barrier_sha256=file_sha256(barrier_model)
         )
@@ -291,6 +295,116 @@ def plot_trajectory(run_dir, barrier_model=None):
     return path
 
 
+def post_pulse_ideal_rollout(run):
+    """Plot-only DS continuation from the state after the last forced physics interval."""
+    from sim.ds import ideal_rollout, load_scenario
+
+    with np.load(Path(run["run_dir"]) / "traj.npz", allow_pickle=False) as tr:
+        t = tr["t"]
+        prefix = "physics_" if "physics_F_ext" in tr else ""
+        force, times, positions = (tr[prefix + key] for key in ("F_ext", "t", "P"))
+        active = np.flatnonzero(np.any(force[:-1] != 0, axis=1))
+        if not len(active):
+            raise ValueError("Post-pulse DS rollout requires a logged external force pulse")
+        # Force row k acts over [times[k], times[k+1]); its end state is k+1.
+        last = int(active[-1])
+        end = last + 1
+        end_s, point = float(times[end]), positions[end].copy()
+        last_force_start_s = float(times[last])
+        if np.any(force[end] != 0):
+            raise ValueError("External force must be zero at the post-pulse state")
+
+    scenario = load_scenario(run["cfg"])
+    dt = float(run["cfg"]["sim"]["dt"])
+    rate = scenario["rate"] * run["cfg"].get("ds_speed_factor", 1.0)
+    # Check the integration against the original saved ideal path before re-anchoring.
+    original = scenario["emb"].to_world(ideal_rollout(
+        scenario["ds"], scenario["x0"], dt, len(t) - 1, rate
+    ))
+    if not np.array_equal(original, run["ideal_world"]):
+        raise ValueError("DS integration does not reproduce the saved original ideal rollout")
+    x0 = world_to_model(point[None], run["embedding"])[0]
+    n_steps = int(np.floor((t[-1] - end_s) / dt + 1e-9))
+    normalized = ideal_rollout(scenario["ds"], x0, dt, n_steps, rate)
+    world = model_to_world(normalized, run["embedding"])
+    axes = run["displayed_axes"]
+    metadata = {
+        "state_source": prefix + "P",
+        "state_index": end,
+        "start_time_s": end_s,
+        "last_force_interval_start_s": last_force_start_s,
+        "tcp_position_m": point.tolist(),
+        "initial_model_position": x0.tolist(),
+        "initial_world_position_m": world[0].tolist(),
+        "start_xy_error_mm": float(1000 * np.max(np.abs(world[0, axes] - point[axes]))),
+        "dt_s": dt,
+        "rate_per_s": rate,
+        "n_steps": n_steps,
+        "original_rollout_reproduced": True,
+    }
+    return world, metadata
+
+
+def plot_nominal_perturbed(nominal_dir, perturbed_dir, path, barrier_model, onset_s=None):
+    """Compare full TCP paths, the original DS, and a plot-only post-pulse DS rollout."""
+    nominal = load_plot_run(nominal_dir, barrier_model)
+    perturbed = load_plot_run(perturbed_dir, barrier_model)
+    for key in ("embedding", "spec", "plot_inputs", "displayed_axes"):
+        if nominal[key] != perturbed[key]:
+            raise ValueError(f"Paired plot inputs differ: {key}")
+    for key in ("model", "robot", "start_id"):
+        if nominal["manifest"][key] != perturbed["manifest"][key]:
+            raise ValueError(f"Paired plot identity differs: {key}")
+    if not np.array_equal(nominal["ideal_world"], perturbed["ideal_world"]):
+        raise ValueError("Paired runs must share the original ideal DS rollout")
+    axes, emb = nominal["displayed_axes"], nominal["embedding"]
+    post_pulse, rollout_metadata = post_pulse_ideal_rollout(perturbed)
+    fig, ax = plt.subplots(figsize=(8, 7), layout="constrained")
+    try:
+        regions = draw_regions(ax, nominal["spec"], emb, axes,
+                               [nominal["measured_world"], perturbed["measured_world"],
+                                nominal["ideal_world"], post_pulse], barrier_model)
+        ideal = 1000 * nominal["ideal_world"][:, axes]
+        ax.plot(*ideal.T, color="black", lw=1.3, label="Ideal DS rollout", zorder=3)
+        for run, label, color in (
+            (nominal, "Nominal", "#e5b500"),
+            (perturbed, "Perturbed", "#1769cc"),
+        ):
+            measured = 1000 * run["measured_world"][:, axes]
+            ax.plot(*measured.T, color=color, lw=1.8, label=f"{label} TCP", zorder=4)
+        ax.plot(*(1000 * post_pulse[:, axes]).T, color="#9131ac", ls="--", lw=1.5,
+                label="Ideal DS Pertubation", zorder=5)
+        goal = 1000 * model_to_world(np.zeros(2), emb)[axes]
+        ax.plot(*goal, marker="*", color="black", ms=10, ls="none", label="Goal", zorder=5)
+        if onset_s is not None:
+            with np.load(Path(perturbed_dir) / "traj.npz") as tr:
+                k = int(np.argmin(np.abs(tr["t"] - onset_s)))
+            point = 1000 * perturbed["measured_world"][k, axes]
+            ax.plot(*point, marker="x", color="black", ms=6, ls="none",
+                    label="Disturbance applied", zorder=6)
+        names = "xyz"
+        ax.set(xlabel=f"{names[axes[0]]} [mm]", ylabel=f"{names[axes[1]]} [mm]",
+               title=f"Five Obstacle / FR3 / PIC / {nominal['start_id']}")
+        ax.set_aspect("equal", adjustable="box")
+        ax.use_sticky_edges = False
+        ax.margins(0.04)
+        ax.grid(alpha=0.3)
+        handles, _ = ax.get_legend_handles_labels()
+        ax.legend(handles=handles + regions, fontsize=8, loc="best")
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=160, metadata={"Description": json.dumps({
+            "nominal_run": str(nominal_dir), "perturbed_run": str(perturbed_dir),
+            "nominal_states": len(nominal["measured_world"]),
+            "perturbed_states": len(perturbed["measured_world"]),
+            "plot_inputs": nominal["plot_inputs"], "onset_s": onset_s,
+            "post_pulse_ideal_rollout": rollout_metadata,
+        })})
+    finally:
+        plt.close(fig)
+    return path
+
+
 def print_barrier_events(report):
     """Show the first observed sample for each path and event, without merging them."""
     if report.get("status") != "evaluated":
@@ -299,7 +413,7 @@ def print_barrier_events(report):
         for label, key in (("B>0 inside X", "first_positive_inside_s"),
                            ("box exit", "first_box_exit_s")):
             time = result[key]
-            detail = "keine" if time is None else f"{report['start_id']} at t={time:.9g} s"
+            detail = "none" if time is None else f"{report['start_id']} at t={time:.9g} s"
             print(f"{name}: first {label}: {detail}")
 
 

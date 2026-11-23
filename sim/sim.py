@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Callable, TypeVar
 import mujoco
 import numpy as np
 from .ds import load_scenario
+from .fr3_variants import MASS_VARIANTS
 from .robot import (
     Robot,
     ROBOTS,
@@ -25,12 +25,10 @@ from .robot import (
     R_DES_DEFAULT,
 )
 
-State = TypeVar("State")
-
 
 @dataclass
 class SimParams:
-    dt: float = 0.002
+    dt: float = 0.001
     T_max: float = 30.0
     k_perp: float = 5.0
     k_rot: float = 5.0
@@ -39,12 +37,12 @@ class SimParams:
     seed: int = 0
     start_criterion: str = "nearest_ref"
     start_min_margin_pct: float = 5.0
-    clear_every: int = 10
     ik: IKParams = field(default_factory=IKParams)
 
 
 def sim_params(cfg):
     values = dict(cfg["sim"])
+    values.pop("clear_every", None)  # Retained in resolved YAML for legacy run hashes.
     return SimParams(ik=IKParams(**values.pop("ik")), **values)
 
 
@@ -67,12 +65,10 @@ class Case:
     tau_limit: np.ndarray | None = None
     speed_factor: float = 1.0
     plant_report: dict | None = None
-    robot_name: str = "FR3"
     unsafe: object = None
     scenario: dict | None = None
     orient: OrientParams | None = None
     p0_world: np.ndarray | None = None
-    out_of_plane_offset_m: float = 0.0
     position_mode: str = "xyz"
 
 
@@ -93,6 +89,7 @@ def build_case(
     plant = resolve_plant(plant)
     robot = Robot(ROBOTS[name])
     plant_report = apply_plant(robot, plant)
+    # Same selected MJCF, but without the plant perturbations.
     robot_nominal = Robot(ROBOTS[name])
     alpha = float(cfg.get("ds_speed_factor", 1.0) if speed_factor is None else speed_factor)
     if not (np.isfinite(alpha) and alpha > 0):
@@ -127,6 +124,7 @@ def build_case(
             )
         p0 = p0 + offset * emb.normal
     if t.get("q_start_rad") is not None:
+        # Preserve a supplied IK branch; report its TCP error without re-solving it.
         q0 = np.asarray(t["q_start_rad"], float)
         if q0.shape != (robot.n,):
             raise ValueError(f"task.q_start_rad needs {robot.n} values")
@@ -146,11 +144,18 @@ def build_case(
             True,
         )
     else:
+        # MuJoCo's COM-based Jacobian computation can change by roundoff after
+        # a density change. Use the identical reference model for start IK so
+        # paired density experiments retain exactly the same initial angles.
+        ik_robot = robot
+        if name in MASS_VARIANTS:
+            ik_robot = Robot(ROBOTS["FR3"])
+            apply_plant(ik_robot, plant)
         ikr = multistart_ik(
-            robot,
+            ik_robot,
             p0,
             tgt,
-            robot.q_home,
+            ik_robot.q_home,
             sp.n_starts,
             sp.seed,
             sp.start_criterion,
@@ -178,43 +183,24 @@ def build_case(
         tau_limit=torque_limit(robot.spec.name, plant["torque_limit_scale"]),
         speed_factor=alpha,
         plant_report=plant_report,
-        robot_name=name,
         unsafe=scn["unsafe"],
         scenario=scn,
         orient=orient,
         p0_world=np.asarray(p0, float).copy(),
-        out_of_plane_offset_m=offset,
         position_mode=position_mode,
     )
 
 
-def run_intervals(
-    model,
-    data,
-    n_steps: int,
-    *,
-    observe: Callable[[int], State],
-    command: Callable[[int, State], None],
-    after_step: Callable[[int], None],
-    n_substeps: int = 1,
-    forward_before_observe: bool = False,
-) -> None:
-    """Record N+1 states and execute N commands, each held for n_substeps.
-
-    PIC requires fresh dynamics before observing each state. Servo keeps
-    its historical single initial mj_forward outside this schedule.
-    Model flags, initialization and cleanup remain with the caller.
-    """
-    for k in range(n_steps + 1):
-        if forward_before_observe:
-            mujoco.mj_forward(model, data)
-        state = observe(k)
-        if k == n_steps:
-            return
-        command(k, state)
-        for _ in range(n_substeps):
-            mujoco.mj_step(model, data)
-        after_step(k)
+def first_contact_at(model, data, time_s):
+    """Record the first active contact, with body names under the saved geoms key."""
+    contact = data.contact[0]
+    return {
+        "t_s": time_s,
+        "geoms": [
+            model.body(int(model.geom_bodyid[geom])).name
+            for geom in (contact.geom1, contact.geom2)
+        ],
+    }
 
 
 def execute_intervals(
@@ -227,19 +213,25 @@ def execute_intervals(
     after_step,
     n_substeps=1,
     forward_before_observe=False,
+    environment=None,
 ):
-    """Apply typed commands at the source schedule's command boundary."""
+    """Record N+1 states and apply N typed commands, each held for n_substeps.
 
-    def apply_command(k, state):
+    PIC requires fresh dynamics before observing each state. Servo keeps
+    its single initial mj_forward outside this schedule.
+    """
+    for k in range(n_steps + 1):
+        if forward_before_observe:
+            mujoco.mj_forward(model, data)
+        state = observe(k)
+        if k == n_steps:
+            # The final state is logged, but has no following control interval.
+            return
         command(k, state).apply(data)
-
-    run_intervals(
-        model,
-        data,
-        n_steps,
-        observe=observe,
-        command=apply_command,
-        after_step=after_step,
-        n_substeps=n_substeps,
-        forward_before_observe=forward_before_observe,
-    )
+        for substep in range(n_substeps):
+            if environment is None:
+                mujoco.mj_step(model, data)
+            else:
+                with environment.physics_step(model, data, k * n_substeps + substep):
+                    mujoco.mj_step(model, data)
+        after_step(k)

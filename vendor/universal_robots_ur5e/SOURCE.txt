@@ -1,0 +1,15 @@
+Project: MuJoCo Menagerie / Universal Robots UR5e
+Upstream: https://github.com/google-deepmind/mujoco_menagerie/tree/main/universal_robots_ur5e
+Copied from: LfD_sim/vendor/mujoco_menagerie/universal_robots_ur5e/
+Source checkout: 63e07b4f22240790818a0d884cb634e3b2a90054
+The source SOURCE.txt attributes this directory to Menagerie revision
+ d7b481bac63d3d600ab404ee74f7474c5efe8a67 (not independently revalidated).
+Included: byte-identical ur5e.xml, its 20 referenced OBJ meshes, and LICENSE.
+Exact copied-file hashes are recorded in asset_manifest.json.
+License: BSD-3-Clause; see LICENSE. No robot geometry, inertias, TCP or actuator gains changed.
+
+Position limits come from the compiled MJCF; effort limits are its actuator
+forcerange (150/150/150/28/28/28 N m). Velocity limits are pi rad/s, matching:
+https://github.com/UniversalRobots/Universal_Robots_ROS2_Description/blob/rolling/config/ur5e/joint_limits.yaml
+The latter source was checked on 2026-11-16; it declares acceleration limits unavailable.
+No FR3 acceleration or synthetic-friction reference is applied to UR5e.

@@ -1,14 +1,14 @@
-"""FR3 kinematics, physical parameters, gravity, actuator mapping, and IK."""
+"""Registered arm models, kinematics, physical parameters, actuator mapping, and IK."""
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
+from .fr3_variants import FIXED_VARIANTS, MASS_VARIANTS
 
 MENAGERIE_DIR = str(Path(__file__).resolve().parents[1] / "vendor")
-TASK_DIMS = {"pos": 3, "axis5": 5, "full6": 6}
 TAU_MAX_DOC = {
     "FR3": (
         np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]),
@@ -29,6 +29,9 @@ class RobotSpec:
     qd_max: tuple
     sources: dict = field(default_factory=dict)
     caveats: tuple = ()
+    family: str = ""
+    fixed_joints: tuple = ()  # (original joint name, fixed angle [rad]); absent from q.
+    acceleration_reference_rad_s2: float | None = None
 
 
 FR3 = RobotSpec(
@@ -41,8 +44,61 @@ FR3 = RobotSpec(
     (2.62, 2.62, 2.62, 2.62, 5.26, 4.18, 5.26),
     sources={"limits": "franka_description robots/fr3/joint_limits.yaml"},
     caveats=("Constant velocity limits omit the source position-dependent limits.",),
+    family="FR3",
+    acceleration_reference_rad_s2=10.0,
 )
-ROBOTS = {"FR3": FR3}
+
+
+def _fr3_variant(name, filename, locked):
+    """Keep physical references in original joint order after removing fixed joints."""
+    # Reduced array indices must still use the limits of the original named axes.
+    indices = [i for i, joint in enumerate(FR3.joints) if joint not in locked]
+    TAU_MAX_DOC[name] = (TAU_MAX_DOC["FR3"][0][indices], TAU_MAX_DOC["FR3"][1])
+    return replace(
+        FR3, name=name, mjcf=f"franka_fr3/{filename}",
+        joints=tuple(FR3.joints[i] for i in indices),
+        q_min_doc=tuple(FR3.q_min_doc[i] for i in indices),
+        q_max_doc=tuple(FR3.q_max_doc[i] for i in indices),
+        qd_max=tuple(FR3.qd_max[i] for i in indices),
+        fixed_joints=tuple(
+            (joint, (FR3.q_min_doc[FR3.joints.index(joint)] +
+                     FR3.q_max_doc[FR3.joints.index(joint)]) / 2)
+            for joint in locked
+        ),
+    )
+
+
+FR3_FIXED_J5 = _fr3_variant("FR3_fixed_J5", "fr3_fixed_j5.xml", ("fr3_joint5",))
+FR3_FIXED_J3 = _fr3_variant("FR3_fixed_J3", "fr3_fixed_j3.xml", ("fr3_joint3",))
+FR3_FIXED_J3_J5 = _fr3_variant(
+    "FR3_fixed_J3_J5", "fr3_fixed_j3_j5.xml", ("fr3_joint3", "fr3_joint5")
+)
+UR5E = RobotSpec(
+    "UR5e", "universal_robots_ur5e/ur5e.xml",
+    ("shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
+     "wrist_1_joint", "wrist_2_joint", "wrist_3_joint"),
+    "attachment_site",
+    (-2*np.pi, -2*np.pi, -np.pi, -2*np.pi, -2*np.pi, -2*np.pi),
+    (2*np.pi, 2*np.pi, np.pi, 2*np.pi, 2*np.pi, 2*np.pi),
+    (np.pi,) * 6,
+    sources={
+        "limits": "UniversalRobots/Universal_Robots_ROS2_Description/config/ur5e/joint_limits.yaml",
+        "effort": "Menagerie ur5e.xml actuator forcerange: 150/150/150/28/28/28 N m",
+    },
+    caveats=("MJCF position limits are rounded; elbow limited to approximately +/- pi.",
+             "No acceleration reference configured; native MJCF has no joint frictionloss."),
+    family="UR5e",
+)
+TAU_MAX_DOC["UR5e"] = (np.array([150., 150., 150., 28., 28., 28.]), UR5E.sources["effort"])
+ROBOTS = {spec.name: spec for spec in (FR3, FR3_FIXED_J5, FR3_FIXED_J3, FR3_FIXED_J3_J5, UR5E)}
+ROBOTS.update({
+    name: _fr3_variant(name, filename, tuple(f"fr3_joint{i}" for i in locked))
+    for name, (filename, locked) in FIXED_VARIANTS.items()
+})
+ROBOTS.update({
+    name: _fr3_variant(name, filename, ())
+    for name, (filename, _link, _factor) in MASS_VARIANTS.items()
+})
 
 
 def _quat_z_to(a: np.ndarray) -> np.ndarray:
@@ -198,15 +254,11 @@ def nullspace_projector(J: np.ndarray) -> np.ndarray:
 def dls(J: np.ndarray, v: np.ndarray, eps: float, lam_max: float):
     U, S, Vt = np.linalg.svd(J, full_matrices=False)
     smin = float(S[-1])
+    # Damping grows below eps to limit amplification near a kinematic singularity.
     lam2 = 0.0 if smin >= eps else (1.0 - (smin / eps) ** 2) * lam_max**2
     denom = S**2 + lam2
     coef = np.where(denom > 0, S / np.where(denom > 0, denom, 1.0), 0.0)
     return (Vt.T @ (coef * (U.T @ v)), smin, lam2)
-
-
-def manipulability(J: np.ndarray) -> float:
-    S = np.linalg.svd(J, compute_uv=False)
-    return float(np.prod(S))
 
 
 def perp_basis(a: np.ndarray) -> np.ndarray:
@@ -281,6 +333,7 @@ def solve_qdot(
     qd[idx] = qd_f
     scale = float(np.max(np.abs(qd) / qd_max))
     if scale > 1.0:
+        # Uniform scaling preserves direction; clipping each joint would distort it.
         qd = qd / scale
     return (
         qd,
@@ -288,7 +341,6 @@ def solve_qdot(
             "sigma_min": smin,
             "lam2": lam2,
             "vel_scale": scale,
-            "manip": manipulability(Jf) if Jf.shape[0] <= Jf.shape[1] else 0.0,
         },
     )
 
@@ -377,6 +429,7 @@ def multistart_ik(
         elif criterion == "max_sigma_margin":
             ok = [s for s in conv if robot.limit_margin_pct(s[0]).min() > min_margin_pct]
             margin_ok = bool(ok)
+            # Margin is preferred, not required; retain converged solutions as fallback.
             pool = ok if ok else conv
             best = max(pool, key=lambda s: task_sigma_min(robot, s[0], tgt, free))
         else:
@@ -453,10 +506,12 @@ def position_servo_map(robot) -> ServoMap:
     )
 
 
-def gravity_torque(robot, q) -> np.ndarray:
+def gravity_torque(robot, q, *, data=None) -> np.ndarray:
     """Generalized gravity force g(q) (qfrc_bias at q_dot = 0) in robot joint order."""
-    d = mujoco.MjData(robot.model)
+    d = mujoco.MjData(robot.model) if data is None else data
     d.qpos[robot.qadr] = q
+    d.qvel[:] = 0.0
+    # Fresh data has zero velocity, so qfrc_bias contains no Coriolis contribution.
     mujoco.mj_forward(robot.model, d)
     return d.qfrc_bias[robot.dadr].copy()
 
@@ -511,14 +566,15 @@ def resolve_plant(plant: dict | None) -> dict:
 
 
 def synthetic_frictionloss(robot_name: str, mode: str) -> np.ndarray:
-    """Synthetic joint Coulomb friction for a robot whose MJCF has none (see module docstring)."""
-    ref = FR3_REF[1]
-    n = len(TAU_MAX_DOC[robot_name][0])
-    if n > len(ref):
-        raise ValueError("more joints than the FR3 reference")
+    """Explicit FR3-only diagnostic reference, indexed by original joint names."""
+    spec = ROBOTS[robot_name]
+    if spec.family != "FR3":
+        raise ValueError("FR3 synthetic friction is not defined for this robot")
+    indices = [FR3.joints.index(joint) for joint in spec.joints]
+    ref = FR3_REF[1][indices]
     if mode == "absolute":
-        return ref[:n].copy()
-    return ref[:n] / TAU_MAX_DOC["FR3"][0][:n] * TAU_MAX_DOC[robot_name][0]
+        return ref.copy()
+    return ref / TAU_MAX_DOC["FR3"][0][indices] * TAU_MAX_DOC[robot_name][0]
 
 
 def torque_limit(robot_name: str, scale: float) -> np.ndarray:
@@ -532,11 +588,9 @@ def apply_plant(robot, plant: dict | None) -> dict:
     nominal = {"gravity": m.opt.gravity.copy()}
     syn = None
     if np.all(m.dof_frictionloss[robot.dadr] == 0.0):
-        syn = p["synthetic_friction"] or "relative"
-        if syn != "none" and robot.spec.name != "FR3":
+        syn = p["synthetic_friction"] or "none"
+        if syn != "none":
             m.dof_frictionloss[robot.dadr] = synthetic_frictionloss(robot.spec.name, syn)
-        else:
-            syn = "none" if robot.spec.name != "FR3" else None
     elif p["synthetic_friction"] not in (None, "none"):
         raise ValueError(
             f"{robot.spec.name} MJCF already has joint friction; synthetic_friction would overwrite a real model value"
@@ -546,6 +600,7 @@ def apply_plant(robot, plant: dict | None) -> dict:
     m.dof_damping[:] *= p["dof_damping_scale"]
     m.opt.gravity[:] = m.opt.gravity * p["gravity_scale"]
     m.body_mass[:] *= p["mass_scale"]
+    # mass_scale also scales inertia; inertia_scale adds an independent perturbation.
     m.body_inertia[:] *= p["mass_scale"] * p["inertia_scale"]
     com = None
     if p["com_shift"] is not None:
@@ -563,6 +618,7 @@ def apply_plant(robot, plant: dict | None) -> dict:
             "dxyz_m": p["com_shift"]["dxyz_m"],
             "ipos_after_m": m.body_ipos[b].tolist(),
         }
+    # Refresh MuJoCo's derived constants after changing mass, inertia or COM.
     mujoco.mj_setConst(m, mujoco.MjData(m))
     lim = torque_limit(robot.spec.name, p["torque_limit_scale"])
     if p["servo_enforce_torque_limit"]:

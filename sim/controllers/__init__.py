@@ -1,4 +1,4 @@
-"""Shared command contract; each controller owns its internal state and diagnostics."""
+"""Shared command contract"""
 
 from dataclasses import dataclass
 from typing import Literal

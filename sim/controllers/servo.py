@@ -13,8 +13,9 @@ from sim.robot import (
     gravity_torque,
     TAU_MAX_DOC,
 )
-from sim.sim import execute_intervals as run_intervals
+from sim.sim import execute_intervals, first_contact_at
 from . import Command
+from sim.disturbance import TCPForceEnvironment
 
 
 def _run_source(
@@ -33,10 +34,9 @@ def _run_source(
     gravity_ff: bool = False,
     tau_limit=None,
     position_mode="xyz",
-    joint_control=None,
+    pulses=(),
 ) -> dict:
-    """Closed-loop DS execution with MuJoCo dynamics. Same arguments as sim.run (q_start is
-    mandatory so that both execution modes start from the identical configuration).
+    """Execute the native position servo from the resolved joint start.
 
     gravity_ff: start the servo target at q_start + g(q_start)/kp (static equilibrium of the
     PD servo at q_start), so the robot does not sag at t = 0. The robot itself still starts
@@ -44,6 +44,7 @@ def _run_source(
     tau_limit: joint torque limits used for REPORTING only [Nm]; default TAU_MAX_DOC."""
     m = robot.model
     n = robot.n
+    environment = TCPForceEnvironment(robot, pulses) if pulses else None
     validate_position_mode(position_mode, emb, "none" if tgt.mode == "pos" else "hold")
     if not np.isclose(sp.dt, n_substeps * m.opt.timestep):
         raise ValueError(f"controller dt {sp.dt} != n_substeps * timestep {m.opt.timestep}")
@@ -102,9 +103,9 @@ def _run_source(
         R0 = R if R0 is None else R0
         x_n, dp = emb.to_plane(p)
         P[k], Xn[k], Q[k], QD[k], QDES[k], dperp[k] = (p, x_n, q, qd_meas, q_des, dp)
-        v_lin = v_peak * emb.vel_to_world(ds.f_n(x_n)) - sp.k_perp * dp * emb.normal
-        if position_mode == "xy":
-            v_lin = v_peak * emb.vel_to_world(ds.f_n(x_n))
+        v_lin = v_peak * emb.vel_to_world(ds.f_n(x_n))
+        if position_mode == "xyz":
+            v_lin = v_lin - sp.k_perp * dp * emb.normal
         Jt, vt, oe = servo_task_rows(robot.jac(), R, tgt, v_lin, sp.k_rot, emb, position_mode)
         ori[k] = oe if tgt.mode != "pos" else float(np.linalg.norm(rot_error(R, R0)))
         return (q, qd_meas, Jt, vt)
@@ -117,6 +118,7 @@ def _run_source(
         vscale[k] = info["vel_scale"]
         n_vel_scale += info["vel_scale"] > 1.0
         n_damped += info["lam2"] > 0.0
+        # Integrate the persistent target; resetting it to measured q changes the servo law.
         q_new = q_des + qd_cmd * sp.dt
         q_des = np.clip(q_new, lo, hi)
         hit = q_des != q_new
@@ -133,19 +135,19 @@ def _run_source(
         if contact_check:
             ncon[k] = d.ncon
             if d.ncon and first_contact is None:
-                c = d.contact[0]
-                first_contact = {
-                    "t_s": (k + 1) * sp.dt,
-                    "geoms": [
-                        m.body(int(m.geom_bodyid[c.geom1])).name,
-                        m.body(int(m.geom_bodyid[c.geom2])).name,
-                    ],
-                }
+                first_contact = first_contact_at(m, d, (k + 1) * sp.dt)
         if not np.all(np.isfinite(d.qpos)):
             raise FloatingPointError(f"{robot.spec.name}: non-finite qpos at step {k}")
 
-    run_intervals(
-        m, d, N, observe=observe, command=command, after_step=after_step, n_substeps=n_substeps
+    execute_intervals(
+        m,
+        d,
+        N,
+        observe=observe,
+        command=command,
+        after_step=after_step,
+        n_substeps=n_substeps,
+        environment=environment,
     )
     t = np.arange(N + 1) * sp.dt
     L = emb.L
@@ -164,6 +166,7 @@ def _run_source(
     }
     res = {
         "robot": robot.spec.name,
+        "joint_names": list(robot.spec.joints),
         "mode": tgt.mode,
         "execution": "dynamic",
         "control_interface": "MuJoCo joint position servo (ctrl = q_des), tau = kp (ctrl - q) - kv q_dot",
@@ -226,6 +229,14 @@ def _run_source(
         "ncon": ncon,
         "tau_limit": tau_doc,
     }
+    res["traj"]["F_ext"] = np.asarray([
+        environment.force_at_step(k * n_substeps)
+        if environment is not None and k < N
+        else np.zeros(3)
+        for k in range(N + 1)
+    ])
+    if environment is not None:
+        res["traj"].update(environment.trajectory(m, d))
     return res
 
 
@@ -243,4 +254,5 @@ def run(case):
         n_substeps=1,
         tau_limit=case.tau_limit,
         position_mode=case.position_mode,
+        pulses=case.cfg["disturbance"]["pulses"] if case.cfg["disturbance"]["enabled"] else (),
     )

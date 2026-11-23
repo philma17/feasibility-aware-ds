@@ -13,6 +13,10 @@ from zipfile import BadZipFile
 import numpy as np
 import yaml
 
+from sim.robot import ROBOTS
+from evaluation.metrics import evaluate_saved_run
+from evaluation.run_artifacts import read_config, sha256
+
 METRICS = (
     "final_distance_m",
     "t_reach_s",
@@ -37,15 +41,18 @@ EVENTS = (
 )
 FIELDS = (
     "start_id",
+    "run_id",
     "run_dir",
     "status",
     "model",
     "robot",
     "controller",
+    "pulse",
     "metrics_status",
     "finite",
     *METRICS,
     "goal_failure",
+    "goal_success",
     "goal_criterion",
     "goal_threshold_m",
     "goal_entry_status",
@@ -54,6 +61,7 @@ FIELDS = (
     "obstacle_entry",
     "barrier_exit",
     "barrier_exit_status",
+    "sampled_barrier_exit",
     "peak_abs_qacc_rad_s2",
     "qacc_intervals",
     "qacc_status",
@@ -226,11 +234,12 @@ def raw_diagnostics(directory, manifest, override, notes):
     return result
 
 
-def summarize_run(start_id, directory, evaluation):
+def summarize_run(start_id, directory, evaluation, *, recompute=False):
     notes = []
     row = dict.fromkeys(FIELDS)
     row.update(
         start_id=start_id,
+        run_id=str(directory),
         run_dir=str(directory),
         status="missing",
         goal_criterion="saved_success",
@@ -251,14 +260,35 @@ def summarize_run(start_id, directory, evaluation):
     if manifest.get("error"):
         notes.append(f"{manifest.get('failure_stage', 'run')}: {manifest['error']}")
     metrics, row["metrics_status"] = read_object(directory / "metrics.json", notes)
+    metrics_hash = manifest.get("artifact_sha256", {}).get("metrics.json")
+    if row["metrics_status"] == "available" and metrics_hash is not None:
+        if sha256(directory / "metrics.json") != metrics_hash:
+            metrics = {}
+            row["metrics_status"] = "invalid"
+            notes.append("Saved metrics hash does not match the run")
     status = manifest.get("status")
     row["status"] = (
         status
         if isinstance(status, str)
         else ("missing_status" if manifest_state == "available" else f"{manifest_state}_manifest")
     )
+    if status == "complete" and (recompute or row["metrics_status"] == "missing") and (
+        "evaluation_schema" in manifest or "trajectory_sha256" in manifest or "artifact_sha256" in manifest
+    ):
+        try:
+            metrics = evaluate_saved_run(directory, manifest)
+            row["metrics_status"] = "recomputed"
+        except (OSError, KeyError, ValueError, TypeError, EOFError, BadZipFile) as exc:
+            metrics = {}
+            row["metrics_status"] = "invalid"
+            notes.append(f"Cannot evaluate saved run: {exc}")
+    row["start_id"] = manifest.get("start_id", start_id)
+    saved_config = manifest.get("config", {})
     for key in ("model", "robot", "controller"):
-        row[key] = manifest.get(key)
+        row[key] = manifest.get(key, saved_config.get(key))
+    pulse = manifest.get("disturbance", saved_config.get("disturbance"))
+    if pulse is not None:
+        row["pulse"] = json.dumps(pulse, sort_keys=True)
     for key in METRICS:
         row[key] = scalar(metrics, key, notes, boolean=(key == "domain_exit"))
     row["finite"] = scalar(metrics, "finite", notes, boolean=True)
@@ -271,9 +301,9 @@ def summarize_run(start_id, directory, evaluation):
     else:
         # The saved success flag remains authoritative; this only records its radius.
         path = directory / "config_resolved.yaml"
-        if path.is_file() and "embedding" in manifest:
+        if (path.is_file() or saved_config) and "embedding" in manifest:
             try:
-                cfg = yaml.safe_load(path.read_text(encoding="utf-8"))
+                cfg = read_config(directory, manifest)
                 radius = cfg["sim"]["success_frac"] * manifest["embedding"]["L_m"]
                 if not isinstance(radius, bool) and math.isfinite(radius) and radius > 0:
                     row["goal_threshold_m"] = radius
@@ -314,6 +344,7 @@ def summarize_run(start_id, directory, evaluation):
             row["qacc_status"] = "available_partial"
     if not thresholds:
         notes.append("Tracking failure not evaluated: no threshold supplied")
+    row["goal_success"] = None if row["goal_failure"] is None else not row["goal_failure"]
     row["notes"] = "; ".join(notes) or None
     return row
 
@@ -469,7 +500,11 @@ def write_summary(path, rows, barrier_reports=None):
         count = str(len(affected)) if evaluated else "NA"
         lines.append(f"| `{event}` | {count} | {evaluated} | {len(rows) - evaluated} | "
                      f"{ids(affected, bool(evaluated))} |")
-    accelerations = finite_pairs(rows, "peak_abs_qacc_rad_s2")
+    # The FR3 reference is not a generic arm limit. UR5e peaks stay observable
+    # in the peak table above, but have no acceleration-reference verdict.
+    fr3_rows = [row for row in rows if row.get("robot") in ROBOTS
+                and ROBOTS[row["robot"]].acceleration_reference_rad_s2 == 10.0]
+    accelerations = finite_pairs(fr3_rows, "peak_abs_qacc_rad_s2")
     exceeded = [start_id for start_id, value in accelerations if value > 10]
     lines += [f"| FR3 acceleration reference exceeded in simulation (>10 rad/s²) | "
               f"{len(exceeded) if accelerations else 'NA'} | {len(accelerations)} | "
@@ -477,7 +512,8 @@ def write_summary(path, rows, barrier_reports=None):
               "Obstacle entry: clearance ≤ 0. Box exit: saved domain_exit. "
               "Torque saturation: saved torque_saturation_steps > 0. "
               "The 10 rad/s² acceleration reference is a simulation diagnostic, "
-              "not a hardware safety verdict.", "",
+              "not a hardware safety verdict; it applies only to the FR3 family. "
+              "UR5e and unknown robots have no configured acceleration reference (NA).", "",
               "| Trajectory | Event | Runs | Evaluated | NA | Samples | Affected start IDs | First sample |",
               "| --- | --- | ---: | ---: | ---: | ---: | --- | --- |"]
     evaluated = [report for report in (barrier_reports or []) if report["status"] == "evaluated"]
@@ -509,7 +545,7 @@ def write_summary(path, rows, barrier_reports=None):
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_model=None):
+def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_model=None, recompute=False):
     batch_dir = Path(batch_dir).resolve()
     if not batch_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {batch_dir}")
@@ -517,9 +553,40 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
     if barrier_model is not None and not Path(barrier_model).is_file():
         raise ValueError(f"Barrier model does not exist: {barrier_model}")
     entries, planned = run_entries(batch_dir, starts)
-    rows = [summarize_run(start_id, directory, cfg) for start_id, directory in entries]
+    study_runs = batch_dir / "study_runs.csv"
+    planned_study = {}
+    if starts is None and not planned and study_runs.is_file():
+        with study_runs.open(newline="", encoding="utf-8") as handle:
+            planned_study = {(batch_dir / row["run_dir"]).resolve(): row for row in csv.DictReader(handle)}
+        present = {path for _, path in entries}
+        entries.extend((row["start_id"], path) for path, row in planned_study.items() if path not in present)
+        planned = True
+    rows = [summarize_run(start_id, directory, cfg, recompute=recompute) for start_id, directory in entries]
+    batch_manifest = batch_dir / "batch.json"
+    batch_settings, _ = read_object(batch_manifest, []) if planned and batch_manifest.is_file() else ({}, "missing")
+    for row in rows:
+        plan = planned_study.get(Path(row["run_dir"]), batch_settings)
+        if plan and row["status"] == "missing":
+            for name in ("start_id", "robot", "model", "controller", "pulse"):
+                row[name] = plan.get(name, row[name])
+            row["notes"] = "Planned run has not been executed"
     path = Path(output) if output is not None else batch_dir / "runs.csv"
+    if path.resolve().suffix != ".csv" or path.resolve().name in {"starts.csv", "study_runs.csv", "planned_starts.csv"}:
+        raise ValueError("Derived run tables must be written to a .csv file")
     path.parent.mkdir(parents=True, exist_ok=True)
+    reports = []
+    for row in rows:
+        report = {"start_id": row["start_id"], "status": "not_evaluated"}
+        if barrier_model is not None:
+            from evaluation.barrier import evaluate_run
+
+            try:
+                report = evaluate_run(row["run_dir"], barrier_model, row["start_id"])
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, BadZipFile) as exc:
+                report.update(status="unavailable", error=f"{type(exc).__name__}: {exc}")
+        reports.append(report)
+        if report["status"] == "evaluated":
+            row["sampled_barrier_exit"] = report["paths"]["tcp"]["positive_samples_inside"] > 0
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
@@ -534,17 +601,6 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
                     for key, value in row.items()
                 }
             )
-    reports = []
-    for row in rows:
-        report = {"start_id": row["start_id"], "status": "not_evaluated"}
-        if barrier_model is not None:
-            from evaluation.barrier import evaluate_run
-
-            try:
-                report = evaluate_run(row["run_dir"], barrier_model, row["start_id"])
-            except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, BadZipFile) as exc:
-                report.update(status="unavailable", error=f"{type(exc).__name__}: {exc}")
-        reports.append(report)
     path.with_name("barrier.json").write_text(
         json.dumps({"runs": reports}, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
@@ -568,11 +624,12 @@ def main(argv=None):
         "--barrier-model", type=Path,
         help="trusted local model_b.pth for separate ideal/TCP sampled checks; default: NA",
     )
+    parser.add_argument("--recompute", action="store_true", help="calculate metrics from verified raw trajectories")
     args = parser.parse_args(argv)
     try:
         path, rows, planned = aggregate(
             args.batch_dir, starts=args.starts, evaluation=args.evaluation, output=args.output,
-            barrier_model=args.barrier_model,
+            barrier_model=args.barrier_model, recompute=args.recompute,
         )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         parser.exit(2, f"Aggregation error: {exc}\n")

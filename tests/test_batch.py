@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+import experiment
 import main
 from sim.batch import plan_starts, run_batch, start_config
 from sim.ds import load_scenario, sample_starts
@@ -82,7 +83,7 @@ class BatchTests(unittest.TestCase):
             run_batch(self.cfg, self.output, 3, single, hashes={}, command_line=["test"])
 
     def test_ik_failure_keeps_row_and_later_start_runs(self):
-        original = main.build_case
+        original = experiment.build_case
 
         def build(cfg):
             if cfg["task"]["start"]["index"] == 0:
@@ -90,12 +91,12 @@ class BatchTests(unittest.TestCase):
             return original(cfg)
 
         cfg = main.load_config("configs/worm_pic.yaml", ["sim.T_max=0.002"])
-        with patch.object(main, "build_case", side_effect=build):
+        with patch.object(experiment, "build_case", side_effect=build):
             code = run_batch(
                 cfg,
                 self.output,
                 2,
-                main.run_single,
+                experiment.run_single,
                 hashes=main.input_hashes(cfg),
                 command_line=["test"],
             )

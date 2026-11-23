@@ -1,17 +1,19 @@
 # Nominal FR3/Five Obstacle; source benchmark start and gains.
 model_source: pth
-time_rate: demo
+# Use dx_n/dt = f_n(x_n); ps and vs remain model-normalization metadata.
+time_rate: 1.0
+ds_speed_factor: 1.0
 robot: FR3
 sim:
   dt: 0.001
   T_max: 20.0
-  success_frac: 0.01
+  success_frac: 0.01  # Goal radius = success_frac * L_m; here 1 mm.
   k_perp: 5.0
   k_rot: 5.0
-  n_starts: 32
-  seed: 0
+  n_starts: 32  # IK candidates per TCP target, independent of --runs.
+  seed: 0  # IK seed; separate from multistart.seed below.
   start_criterion: max_sigma_margin
-  start_min_margin_pct: 5.0
+  start_min_margin_pct: 5.0  # Preferred joint-limit margin; IK may fall back below it.
   ik:
     eps: 0.02
     lam_max: 0.05
@@ -66,10 +68,10 @@ pic:
   - 1600.0
   - 1600.0
   s_max: 10.0
-  s0: 5.0
+  s0: 5.0  # Initial tank energy [J]; half of the 10 J capacity.
   delta_s_frac: 0.1
   delta_z: 0.01
-  eta: 1.0e-06
+  eta: 1.0e-06  # Keep the damping basis below this DS speed [m/s].
   step: quintic
   null_space:
     enabled: true
@@ -78,7 +80,7 @@ pic:
     source: documented
     clip: true
   use_f: true
-  gravity_comp: nominal
+  gravity_comp: nominal  # Selected MJCF before in-memory plant perturbations.
   joint_friction_feedforward:
     enabled: false
 disturbance:
@@ -90,4 +92,4 @@ controller: pic
 spatial: null
 multistart:
   seed: 0
-  n_starts: 20
+  n_starts: 20  # Indexed TCP sample count; --runs overrides it.
