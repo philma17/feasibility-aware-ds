@@ -22,3 +22,7 @@ htmlcov/
 # Local editor settings
 .vscode/
 .idea/
+
+# Local documentation and tests
+/docs/
+/tests/

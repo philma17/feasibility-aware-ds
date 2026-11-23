@@ -284,7 +284,7 @@ and the common interval scheduler has no controller-name branches. Each controll
 keeps its diagnostics beside its callbacks. PIC refreshes dynamics before each
 observation; Servo keeps its source initial-forward and target-update ordering.
 
-Run the targeted checks with:
+If you have the local `tests/` directory, run the targeted checks with:
 
 ```bash
 python -B -m unittest discover -s tests -v
@@ -304,6 +304,6 @@ in [vendor/universal_robots_ur5e](vendor/universal_robots_ur5e/SOURCE.txt).
 
 ## TCP force-pulse experiment
 
-The shared environment-force hook, historical audit, paired PIC experiment,
-reproduction commands, and result locations are documented in
-[docs/tcp_push_experiment.md](docs/tcp_push_experiment.md).
+The local `docs/tcp_push_experiment.md` describes the shared environment-force
+hook, historical audit, paired PIC experiment, reproduction commands, and result
+locations.
