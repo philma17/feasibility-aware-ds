@@ -13,11 +13,14 @@ import numpy as np
 import main
 from evaluation.aggregate import aggregate
 from sim.batch import plan_starts
-from sim.fr3_variants import MASS_VARIANTS, generated_models, MODEL_DIR
+from sim.fr3_variants import MASS_VARIANTS
 from sim.robot import (
     FR3, MENAGERIE_DIR, ROBOTS, Robot, apply_plant, gravity_torque,
     position_servo_map, torque_limit,
 )
+
+
+LOCAL_TOOLS = Path(__file__).resolve().parents[1] / "tools"
 
 
 class RobotModelTests(unittest.TestCase):
@@ -103,14 +106,21 @@ class RobotModelTests(unittest.TestCase):
                 ])
                 np.testing.assert_allclose(Jp, numeric, atol=2e-10, rtol=0)
 
-    def test_generated_mjcfs_and_isolated_link_density_changes(self):
+    @unittest.skipUnless((LOCAL_TOOLS / "generate_fr3_variants.py").is_file(), "local FR3 generator unavailable")
+    def test_generated_mjcfs_match(self):
+        from tools.generate_fr3_variants import generated_models
+
         for filename, text in generated_models().items():
-            self.assertEqual((MODEL_DIR / filename).read_text(), text)
+            with self.subTest(filename=filename):
+                self.assertEqual((Path(MENAGERIE_DIR) / FR3.mjcf).with_name(filename).read_text(), text)
+
+    def test_isolated_link_density_changes(self):
         original = Robot(FR3)
+        base_path = Path(MENAGERIE_DIR) / FR3.mjcf
         for name, (filename, link, factor) in MASS_VARIANTS.items():
             with self.subTest(robot=name):
-                base = ET.parse(MODEL_DIR / "fr3.xml")
-                variant = ET.parse(MODEL_DIR / filename)
+                base = ET.parse(base_path)
+                variant = ET.parse(base_path.with_name(filename))
                 a = base.find(f".//body[@name='{link}']/inertial")
                 b = variant.find(f".//body[@name='{link}']/inertial")
                 for attr in ("mass", "diaginertia"):
@@ -128,8 +138,9 @@ class RobotModelTests(unittest.TestCase):
                                        expected, places=13)
                 np.testing.assert_array_equal(torque_limit(name, 1), torque_limit("FR3", 1))
 
+    @unittest.skipUnless((LOCAL_TOOLS / "compare_fr3_mass.py").is_file(), "local FR3 mass comparison unavailable")
     def test_mass_gravity_report_and_matched_compensation(self):
-        from evaluation.compare_fr3_mass import compare
+        from tools.compare_fr3_mass import compare
         cfg = main.load_config("configs/five_obstacle_pic.yaml")
         report = compare(cfg)
         np.testing.assert_array_equal(report["q_rad"], cfg["task"]["q_start_rad"])

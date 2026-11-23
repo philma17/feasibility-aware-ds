@@ -22,6 +22,8 @@ def resample_arclength(P: np.ndarray, n: int) -> np.ndarray:
 
 
 def point_to_polyline(X: np.ndarray, P: np.ndarray, chunk: int = 512) -> np.ndarray:
+    if len(X) * len(P) > 1_000_000:
+        return _point_to_polyline_tree(np.asarray(X), np.asarray(P))
     A, B = (P[:-1], P[1:])
     AB = B - A
     L2 = np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-300)
@@ -32,6 +34,46 @@ def point_to_polyline(X: np.ndarray, P: np.ndarray, chunk: int = 512) -> np.ndar
         proj = A[None] + t[..., None] * AB[None]
         out[i : i + chunk] = np.sqrt(np.min(np.sum((x - proj) ** 2, axis=2), axis=1))
     return out
+
+
+def _point_to_polyline_tree(X, P):
+    """Exact segment distances with bounding-box pruning for long saved paths."""
+    from scipy.spatial import cKDTree
+
+    A, AB = P[:-1], np.diff(P, axis=0)
+    L2 = np.maximum(np.einsum("ij,ij->i", AB, AB), 1e-300)
+    # A nearest vertex supplies an upper bound, never a segment approximation.
+    _, nearest = cKDTree(P).query(X)
+    best = np.sum((X - P[nearest]) ** 2, axis=1)
+    scale = max(1.0, float(np.abs(P).max()), float(np.abs(X).max()))
+    eps = np.finfo(float).eps
+    slack = 64 * eps * (best + scale * np.sqrt(best) + eps * scale**2)
+
+    def visit(segments, queries):
+        lo = np.minimum(A[segments], P[segments + 1]).min(axis=0)
+        hi = np.maximum(A[segments], P[segments + 1]).max(axis=0)
+        delta = np.maximum(np.maximum(lo - X[queries], X[queries] - hi), 0)
+        queries = queries[np.sum(delta**2, axis=1) <= best[queries] + slack[queries]]
+        if not len(queries):
+            return
+        if len(segments) <= 32:
+            for offset in range(0, len(queries), 512):
+                ids = queries[offset : offset + 512]
+                d = X[ids, None] - A[segments]
+                t = np.clip(np.einsum("kij,ij->ki", d, AB[segments]) / L2[segments], 0, 1)
+                proj = A[segments] + t[..., None] * AB[segments]
+                distances = np.sum((X[ids, None] - proj) ** 2, axis=2)
+                best[ids] = np.minimum(best[ids], distances.min(axis=1))
+            return
+        centers = (A[segments] + P[segments + 1]) / 2
+        axis = np.argmax(np.ptp(centers, axis=0))
+        order = np.argsort(centers[:, axis], kind="stable")
+        middle = len(order) // 2
+        visit(segments[order[:middle]], queries)
+        visit(segments[order[middle:]], queries)
+
+    visit(np.arange(len(A)), np.arange(len(X)))
+    return np.sqrt(best)
 
 
 def chamfer(P: np.ndarray, Q: np.ndarray, n: int = 1000):
@@ -77,16 +119,6 @@ def dtw_mean(P: np.ndarray, Q: np.ndarray, n: int = 400) -> float:
             Kr[j] = k + 1
         Cp, Kp = (Cr, Kr)
     return float(Cp[n] / Kp[n])
-
-
-def rmse_time_sync(P: np.ndarray, Q: np.ndarray) -> float:
-    if P.shape != Q.shape:
-        raise ValueError("Time-synchronous RMSE requires matching sample shapes")
-    return float(np.sqrt(np.mean(np.sum((P - Q) ** 2, axis=1))))
-
-
-def max_dev_time_sync(P: np.ndarray, Q: np.ndarray) -> float:
-    return float(np.max(np.linalg.norm(P - Q, axis=1)))
 
 
 class UnsafeSet:
@@ -160,7 +192,7 @@ class UnsafeSet:
         return d
 
 
-def tracking_metrics(P, P_id, goal, L, dt, success_frac) -> dict:
+def tracking_metrics(P, P_id, goal, L, dt, success_frac) -> tuple[dict, np.ndarray, np.ndarray]:
     """Shared task-space metrics for both execution modes (world frame, metres).
 
     time-synchronized error e_k = ||P_k - P_id,k||, P_id,k = ideal DS Euler rollout at the same
@@ -191,37 +223,96 @@ def tracking_metrics(P, P_id, goal, L, dt, success_frac) -> dict:
     )
 
 
-def summarize(result, case):
-    """Evaluate finite saved states; torque and domain events remain separate."""
-    tr = result["traj"]
-    n = len(tr["t"]) - 1
-    goal = case.emb.to_world(np.zeros(len(case.x0_n)))
-    tracking = result.get("tracking")
-    if tracking is None:
-        tracking, _, _ = tracking_metrics(
-            tr["P"], tr["P_ideal"], goal, case.emb.L, case.sp.dt, case.sp.success_frac
-        )
-    command = tr["tau_cmd"][:n]
-    applied = tr["tau_applied"][:n]
-    saturated = np.any(np.abs(command) > case.tau_limit + 1e-9, axis=1)
-    domain = case.scenario["domain"]
-    outside = np.any((tr["Xn"] < domain[:, 0]) | (tr["Xn"] > domain[:, 1]), axis=1)
-    clearance = (
-        case.emb.L * case.unsafe.signed_distance(tr["Xn"]) if case.unsafe is not None else None
-    )
-    return {
-        **tracking,
-        "dtw_mean_m": dtw_mean(tr["P"], tr["P_ideal"]),
-        "success": bool(result["success"]),
-        "finite": bool(result["finite"]),
-        "final_distance_m": float(result["final_dist_m"]),
-        "min_clearance_m": None if clearance is None else float(clearance.min()),
-        "clearance_status": case.scenario["unsafe_info"],
-        "torque_saturation_steps": int(np.count_nonzero(saturated)),
-        "torque_saturation_fraction": float(np.mean(saturated)),
-        "peak_applied_torque_ratio": float(np.max(np.abs(applied) / case.tau_limit)),
-        "domain_exit": bool(outside.any()),
-        "domain_exit_time_s": float(tr["t"][np.argmax(outside)]) if outside.any() else None,
-        "n_intervals": n,
-        "n_states": len(tr["t"]),
-    }
+def summarize_trajectory(tr, cfg, manifest, tracking=None):
+    """Evaluate logged samples using the coordinates and limits recorded by the producer."""
+    metrics = {}
+    times = tr.get("t")
+    n = len(times) - 1 if times is not None else None
+    measured, ideal = tr.get("P"), tr.get("P_ideal")
+    embedding = manifest.get("embedding")
+    inputs = manifest.get("evaluation_inputs", {})
+    if n is not None:
+        metrics.update(n_intervals=n, n_states=len(times))
+    if "Q" in tr and "QD" in tr:
+        metrics["finite"] = bool(np.isfinite(tr["Q"]).all() and np.isfinite(tr["QD"]).all())
+    if measured is not None and len(measured) and np.isfinite(measured).all() and embedding is not None:
+        scale = embedding["L_m"]
+        anchor = np.asarray(embedding["anchor_n"], float)
+        axes = np.asarray(embedding["axes"], float)
+        goal = np.asarray(embedding["origin"], float) + scale * ((np.zeros_like(anchor) - anchor) @ axes.T)
+        distance = np.linalg.norm(measured - goal, axis=1)
+        sim = cfg["sim"]
+        radius = sim["success_frac"] * scale
+        metrics.update(success=bool(distance[-1] < radius), final_distance_m=float(distance[-1]))
+        if times is not None and len(times) == len(distance):
+            reached = np.flatnonzero(distance < radius)
+            metrics["t_reach_s"] = float(times[reached[0]]) if len(reached) else None
+        if ideal is not None and ideal.shape == measured.shape and len(ideal) > 1 and np.isfinite(ideal).all():
+            if tracking is None:
+                tracking, _, _ = tracking_metrics(measured, ideal, goal, scale, sim["dt"], sim["success_frac"])
+            metrics.update(tracking, dtw_mean_m=dtw_mean(measured, ideal))
+
+    limits = inputs.get("torque_limit_Nm", tr.get("tau_limit"))
+    if n is not None and n > 0 and limits is not None:
+        limits = np.asarray(limits)
+        for name in ("tau_cmd", "tau_applied"):
+            torque = tr.get(name)
+            if torque is None or torque.shape not in ((n, len(limits)), (n + 1, len(limits))):
+                continue
+            if not np.isfinite(torque[:n]).all():
+                continue
+            if name == "tau_cmd":
+                saturated = np.any(np.abs(torque[:n]) > limits + 1e-9, axis=1)
+                metrics.update(torque_saturation_steps=int(saturated.sum()),
+                               torque_saturation_fraction=float(saturated.mean()))
+            else:
+                metrics["peak_applied_torque_ratio"] = float(np.max(np.abs(torque[:n]) / limits))
+
+    normalized = tr.get("Xn")
+    domain = inputs.get("domain")
+    if normalized is not None and len(normalized) and np.isfinite(normalized).all():
+        if domain is not None:
+            domain = np.asarray(domain)
+            outside = np.any((normalized < domain[:, 0]) | (normalized > domain[:, 1]), axis=1)
+            metrics["domain_exit"] = bool(outside.any())
+            if times is not None and len(times) == len(outside):
+                metrics["domain_exit_time_s"] = float(times[np.argmax(outside)]) if outside.any() else None
+        if inputs.get("unsafe") is not None and embedding is not None:
+            unsafe = UnsafeSet(inputs["unsafe"], normalized.shape[1])
+            if unsafe.supported:
+                metrics["min_clearance_m"] = float((embedding["L_m"] * unsafe.signed_distance(normalized)).min())
+    clearance = tr.get("clearance_m")
+    if "min_clearance_m" not in metrics and clearance is not None and len(clearance) and np.isfinite(clearance).all():
+        metrics["min_clearance_m"] = float(clearance.min())
+    metrics.setdefault("min_clearance_m", None)
+    metrics["clearance_status"] = inputs.get("clearance_status")
+    return metrics
+
+
+def evaluate_saved_run(directory, manifest=None, *, tracking=None):
+    """Compute derived metrics without constructing a live simulation case."""
+    import json
+    from pathlib import Path
+    from evaluation.run_artifacts import read_config, read_trajectory
+
+    directory = Path(directory)
+    if manifest is None:
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+    trajectory = read_trajectory(directory, manifest)
+    cfg = read_config(directory, manifest)
+    if "evaluation_inputs" not in manifest and ("config" in manifest or "input_sha256" in manifest):
+        from evaluation.barrier import saved_model_inputs
+
+        try:
+            _, _, spec = saved_model_inputs(directory, manifest)
+        except (OSError, KeyError, ValueError):
+            # Historical runs can still provide tracking and recorded clearance.
+            pass
+        else:
+            unsafe = UnsafeSet(spec.get("unsafe"), len(manifest["embedding"]["anchor_n"]))
+            manifest = {**manifest, "evaluation_inputs": {
+                "domain": spec["domain"]["range"],
+                "unsafe": spec.get("unsafe"),
+                "clearance_status": unsafe.describe(),
+            }}
+    return summarize_trajectory(trajectory, cfg, manifest, tracking)

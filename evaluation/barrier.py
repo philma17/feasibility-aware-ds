@@ -3,34 +3,39 @@
 from __future__ import annotations
 
 from functools import lru_cache
-import hashlib
 import json
 from pathlib import Path
 
 import numpy as np
-import yaml
+from evaluation.run_artifacts import read_config, read_trajectory, sha256 as file_sha256
 
 
-def file_sha256(path):
-    with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+def recorded_model_hashes(run_dir, manifest):
+    """Find producer hashes, falling back to the original TCP study input record."""
+    if "input_sha256" in manifest:
+        return manifest["input_sha256"], manifest.get("barrier_sha256")
+    if "config" in manifest and "plan" in manifest:
+        for parent in Path(run_dir).resolve().parents:
+            record = parent / "provenance" / "inputs.json"
+            if record.is_file():
+                inputs = json.loads(record.read_text(encoding="utf-8"))
+                return inputs["inputs"], inputs["barrier_sha256"]
+    raise ValueError("Recorded model input hashes are unavailable")
 
 
 def saved_model_inputs(run_dir, manifest):
-    """Resolve catalog inputs only if they still match the hashes saved by the run."""
+    """Resolve catalog inputs only if they still match the recorded model hashes."""
     from sim.ds import input_path, model_catalog
 
-    cfg_path = Path(run_dir) / "config_resolved.yaml"
-    if file_sha256(cfg_path) != manifest["artifact_sha256"]["config_resolved.yaml"]:
-        raise ValueError("Saved effective configuration hash does not match the run")
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg = read_config(run_dir, manifest)
+    hashes, _ = recorded_model_hashes(run_dir, manifest)
     catalog = cfg["model_catalog"]
-    if file_sha256(input_path(catalog)) != manifest["input_sha256"][catalog]:
+    if file_sha256(input_path(catalog)) != hashes[catalog]:
         raise ValueError("Model catalog has changed since this run")
-    package = model_catalog(catalog)[manifest["model"]]
+    package = model_catalog(catalog)[cfg["model"]]
     for key in ("metadata", "checkpoint"):
         path = package[key]
-        if file_sha256(input_path(path)) != manifest["input_sha256"][path]:
+        if file_sha256(input_path(path)) != hashes[path]:
             raise ValueError(f"Model input has changed since this run: {path}")
     spec = json.loads(input_path(package["metadata"]).read_text(encoding="utf-8"))
     return cfg, package, spec
@@ -70,14 +75,20 @@ def domain_box(spec):
     return box
 
 
-def resolve_barrier_model(package, manifest, path=None):
+def resolve_barrier_model(package, manifest, path=None, *, run_dir=None):
     """Require the Barrier checkpoint's sibling vector field to match the saved run."""
     from sim.ds import input_path
 
     path = Path(path) if path else input_path(package["checkpoint"]).with_name("model_b.pth")
     if not path.is_file():
         raise ValueError("Barrier model missing; supply the matching local --barrier-model PATH")
-    if file_sha256(path.with_name("model_f.pth")) != manifest["input_sha256"][package["checkpoint"]]:
+    hashes, barrier_hash = (recorded_model_hashes(run_dir, manifest) if run_dir is not None
+                            else (manifest["input_sha256"], manifest.get("barrier_sha256")))
+    if barrier_hash is None and "evaluation_schema" in manifest:
+        raise ValueError("No Barrier checkpoint hash was recorded for this run")
+    if barrier_hash is not None and file_sha256(path) != barrier_hash:
+        raise ValueError("Barrier checkpoint hash does not match the archived input")
+    if file_sha256(path.with_name("model_f.pth")) != hashes[package["checkpoint"]]:
         raise ValueError("Barrier package model_f.pth does not match this run")
     return path
 
@@ -162,21 +173,19 @@ def evaluate_run(run_dir, barrier_model, start_id=None):
     result = {"start_id": start_id or manifest.get("start_id", run_dir.name)}
     if not spec.get("Barrier", False):
         return {**result, "status": "no_barrier_model"}
-    path = resolve_barrier_model(package, manifest, barrier_model)
-    trajectory = run_dir / "traj.npz"
-    if file_sha256(trajectory) != manifest["artifact_sha256"]["traj.npz"]:
-        raise ValueError("Saved trajectory hash does not match the run")
-    with np.load(trajectory, allow_pickle=False) as arrays:
-        paths = evaluate_paths(
-            arrays["t"], arrays["P"], arrays["P_ideal"], manifest["embedding"], spec, path
-        )
+    path = resolve_barrier_model(package, manifest, barrier_model, run_dir=run_dir)
+    arrays = read_trajectory(run_dir, manifest)
+    paths = evaluate_paths(
+        arrays["t"], arrays["P"], arrays["P_ideal"], manifest["embedding"], spec, path
+    )
+    hashes, _ = recorded_model_hashes(run_dir, manifest)
     return {
         **result,
         "status": "evaluated",
         "barrier_model": str(path.resolve()),
         "barrier_sha256": file_sha256(path),
-        "metadata_sha256": manifest["input_sha256"][package["metadata"]],
-        "trajectory_sha256": manifest["artifact_sha256"]["traj.npz"],
+        "metadata_sha256": hashes[package["metadata"]],
+        "trajectory_sha256": manifest.get("artifact_sha256", {}).get("traj.npz", manifest.get("trajectory_sha256")),
         "domain_range": domain_box(spec).tolist(),
         "paths": paths,
     }

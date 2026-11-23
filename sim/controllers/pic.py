@@ -2,8 +2,6 @@
 
 [P] Kronander and Billard, "Passive Interaction Control With Dynamical Systems",
 IEEE RA-L 1(1), 2016. [R] epfl-lasa/passive-ds-control reference implementation.
-The source uses the paper's quintic coupling and a deterministic damping basis.
-The explicit-Euler tank update is retained; no discrete passivity proof is implied.
 """
 
 from __future__ import annotations
@@ -12,9 +10,10 @@ import mujoco
 import numpy as np
 from sim.ds import check_dims, ideal_rollout
 from sim.robot import rot_error, plane_component, gravity_torque, TAU_MAX_DOC
-from sim.sim import Case, execute_intervals as run_intervals
+from sim.sim import Case, execute_intervals, first_contact_at
 from evaluation.metrics import tracking_metrics
 from . import Command
+from sim.disturbance import TCPForceEnvironment
 
 
 def smooth_step(x, a: float, b: float, kind: str = "quintic"):
@@ -191,6 +190,7 @@ class PICController:
         s_new = s + sdot * dt
         exc = max(s_new - p.s_max, -s_new, 0.0)
         if exc > 0.0:
+            # Record Euler overshoot before clamping; the clamp is not a passivity proof.
             self.n_clamp += 1
             self.max_excursion = max(self.max_excursion, exc)
             s_new = min(max(s_new, 0.0), p.s_max)
@@ -222,31 +222,19 @@ def null_projector(Jp: np.ndarray, rtol: float = 1e-06):
     return (V0 @ V0.T, n - rank)
 
 
-def apply_tcp_force(m, d, body: int, p_tcp: np.ndarray, force: np.ndarray) -> None:
-    """Point force at the TCP through xfrc_applied. MuJoCo applies xfrc_applied at the body's
-    centre of mass, so the moment (p_tcp - xipos) x F is added to make it a TCP point force
-    (equivalent to the joint torque Jp^T F, verified in tests/test_sim_pic.py)."""
-    d.xfrc_applied[body, :3] = force
-    d.xfrc_applied[body, 3:] = np.cross(p_tcp - d.xipos[body], force)
-
-
 def _run_source(
     case: Case,
     params: PICParams,
     *,
     null_d_q: float = 0.0,
-    tau_limit=None,
     clip: bool = True,
     pulses=(),
     use_f: bool = True,
-    v0=None,
-    T_max=None,
-    q_start=None,
     gravity_comp: str = "nominal",
     joint_friction_feedforward=None,
+    compute_tracking: bool = True,
 ) -> dict:
     """Closed-loop PIC-DS run. use_f=False sets f = 0 (damping + gravity compensation only).
-    v0: initial TCP velocity [m/s] (world), realised with the pseudo-inverse of Jp.
     pulses: iterable of dicts {t_start_s, duration_s, force_N[3]} (world frame, at the TCP).
     gravity_comp: "nominal" (g(q) of the unmodified model, the default: the controller does not know
     about plant changes) or "plant" (g(q) of the simulated, possibly modified model; separates the effect
@@ -262,7 +250,7 @@ def _run_source(
     dt = sp.dt
     if not np.isclose(dt, m.opt.timestep):
         raise ValueError(f"controller dt {dt} != model timestep {m.opt.timestep}")
-    T = sp.T_max if T_max is None else float(T_max)
+    T = sp.T_max
     N = int(round(T / dt))
     x0_n = case.x0_n
     dim = check_dims(ds, emb, x0_n)
@@ -270,9 +258,7 @@ def _run_source(
     P_id = emb.to_world(X_id)
     v_peak = case.rate * emb.L
     goal = emb.to_world(np.zeros(dim))
-    if tau_limit is not None:
-        tau_lim = np.asarray(tau_limit, float)
-    elif case.tau_limit is not None:
+    if case.tau_limit is not None:
         tau_lim = np.asarray(case.tau_limit, float)
     else:
         tau_lim = TAU_MAX_DOC[robot.spec.name][0]
@@ -283,22 +269,19 @@ def _run_source(
         if gravity_comp == "nominal" and case.robot_nominal is not None
         else robot
     )
+    gravity_data = mujoco.MjData(g_robot.model)
     orient = case.orient
     pulses = list(pulses)
-    q0 = np.asarray(case.q_start if q_start is None else q_start, float)
+    environment = TCPForceEnvironment(robot, pulses) if pulses else None
+    q0 = np.asarray(case.q_start, float)
     ctrl = PICController(params)
     if joint_friction_feedforward and joint_friction_feedforward.get("enabled", False):
         raise NotImplementedError(
             "Experimental friction feedforward is not included in this checkout"
         )
-    ff = None
-    FF = {}
     d = mujoco.MjData(m)
     d.qpos[robot.qadr] = q0
     d.qvel[:] = 0.0
-    if v0 is not None:
-        robot.fk(q0)
-        d.qvel[robot.dadr] = np.linalg.pinv(robot.jac()[:3]) @ np.asarray(v0, float)
     keys = (
         "P",
         "Xn",
@@ -344,9 +327,11 @@ def _run_source(
         "null_dim",
         "E_rot",
         "ori_err",
+        "sigma_min_trans",
     )
     S = {k: np.zeros(N + 1) for k in sc_keys}
     old_flags = int(m.opt.disableflags)
+    # Disable MJCF position servos so they cannot add torque to PIC's direct input.
     m.opt.disableflags = old_flags | int(mujoco.mjtDisableBit.mjDSBL_ACTUATION)
     tmp = np.zeros(m.nv)
     first_contact = None
@@ -354,12 +339,12 @@ def _run_source(
 
     def observe(k):
         nonlocal R_ref
-        t = k * dt
         q = d.qpos[robot.qadr].copy()
         qd = d.qvel[robot.dadr].copy()
         p, R = robot.fk(q)
         J6 = robot.jac()
         Jp = J6[:3]
+        S["sigma_min_trans"][k] = np.linalg.svd(Jp, compute_uv=False)[-1]
         xd = Jp @ qd
         omega = J6[3:] @ qd
         if R_ref is None:
@@ -370,22 +355,17 @@ def _run_source(
         if orient is not None and orient.mode == "hold":
             S["E_rot"][k] = 0.5 * orient.K_r * float(e_rot @ e_rot)
         x_n, dp = emb.to_plane(p)
-        f = (
-            v_peak * emb.vel_to_world(ds.f_n(x_n)) - sp.k_perp * dp * emb.normal
-            if use_f
-            else np.zeros(3)
-        )
-        if case.position_mode == "xy":
-            f = (
-                plane_component(v_peak * emb.vel_to_world(ds.f_n(x_n)), emb)
-                if use_f
-                else np.zeros(3)
-            )
+        # Feedback evaluates the DS at the measured TCP, not along the ideal rollout.
+        if use_f:
+            f = v_peak * emb.vel_to_world(ds.f_n(x_n))
+            if case.position_mode == "xy":
+                f = plane_component(f, emb)
+            else:
+                f = f - sp.k_perp * dp * emb.normal
+        else:
+            f = np.zeros(3)
         mujoco.mj_mulM(m, d, tmp, d.qvel)
-        F_ext = np.zeros(3)
-        for pu in pulses:
-            if pu["t_start_s"] <= t < pu["t_start_s"] + pu["duration_s"]:
-                F_ext = F_ext + np.asarray(pu["force_N"], float)
+        F_ext = environment.force_at_step(k) if environment is not None and k < N else np.zeros(3)
         L["P"][k], L["Xn"][k], L["Q"][k], L["QD"][k], L["XD"][k] = (p, x_n, q, qd, xd)
         L["F_ext"][k] = F_ext
         S["KE"][k] = 0.5 * float(d.qvel @ tmp)
@@ -394,14 +374,14 @@ def _run_source(
         S["f_norm"][k] = float(np.linalg.norm(f))
         if k == N:
             S["s"][k] = ctrl.s
-        return (q, qd, p, J6, Jp, xd, omega, e_rot, f, F_ext)
+        return (q, qd, J6, Jp, xd, omega, e_rot, f)
 
     def command(k, state):
-        q, qd, p, J6, Jp, xd, omega, e_rot, f, F_ext = state
+        q, qd, J6, Jp, xd, omega, e_rot, f = state
         out = ctrl.step(plane_component(xd, emb) if case.position_mode == "xy" else xd, f, dt)
         if case.position_mode == "xy":
             out["F"] = plane_component(out["F"], emb)
-        g = gravity_torque(g_robot, q)
+        g = gravity_torque(g_robot, q, data=gravity_data)
         if orient is None:
             Nproj, nd = null_projector(Jp)
             tau_task = Jp.T @ out["F"]
@@ -415,9 +395,6 @@ def _run_source(
         tau_null = -null_d_q * (Nproj @ qd) if null_d_q > 0 and nd > 0 else np.zeros(n)
         tau_cmd = g + tau_task + tau_null
         tau_app = np.clip(tau_cmd, -tau_lim, tau_lim) if clip else tau_cmd.copy()
-        d.xfrc_applied[:] = 0.0
-        if np.any(F_ext):
-            apply_tcp_force(m, d, robot.site_body, p, F_ext)
         L["F"][k], L["TAU_CMD"][k], L["TAU_APP"][k], L["TAU_G"][k] = (out["F"], tau_cmd, tau_app, g)
         for key in ("s", "z", "alpha", "beta_s", "beta_R", "p_diss"):
             S[key][k] = out[key]
@@ -428,19 +405,12 @@ def _run_source(
         nonlocal first_contact
         L["QACC"][k] = d.qacc[robot.dadr]
         if d.ncon and first_contact is None:
-            c = d.contact[0]
-            first_contact = {
-                "t_s": (k + 1) * dt,
-                "geoms": [
-                    m.body(int(m.geom_bodyid[c.geom1])).name,
-                    m.body(int(m.geom_bodyid[c.geom2])).name,
-                ],
-            }
+            first_contact = first_contact_at(m, d, (k + 1) * dt)
         if not np.all(np.isfinite(d.qpos)):
             raise FloatingPointError(f"non-finite qpos at step {k}")
 
     try:
-        run_intervals(
+        execute_intervals(
             m,
             d,
             N,
@@ -448,15 +418,22 @@ def _run_source(
             command=command,
             after_step=after_step,
             forward_before_observe=True,
+            environment=environment,
         )
     finally:
         m.opt.disableflags = old_flags
         d.qfrc_applied[:] = 0.0
-        d.xfrc_applied[:] = 0.0
     P, Q, QD = (L["P"], L["Q"], L["QD"])
-    mt, e_sync, g_dev = tracking_metrics(P, P_id, goal, emb.L, dt, sp.success_frac)
+    if compute_tracking:
+        mt, e_sync, g_dev = tracking_metrics(P, P_id, goal, emb.L, dt, sp.success_frac)
+    else:
+        # Optional postprocessing only; the physics and control schedule are identical.
+        mt = {"status": "not_requested"}
+        e_sync = np.linalg.norm(P - P_id, axis=1)
+        g_dev = None
     dist = np.linalg.norm(P - goal, axis=1)
     reached = np.flatnonzero(dist < sp.success_frac * emb.L)
+    # Terminal command rows are padding; only N intervals actually apply torque.
     TC, TA = (L["TAU_CMD"][:N], L["TAU_APP"][:N])
     clipped = np.abs(TC) > tau_lim + 1e-12
     pos_exc = np.maximum(robot.q_min - Q, Q - robot.q_max)
@@ -570,7 +547,6 @@ def _run_source(
         "tau_grav": L["TAU_G"],
         "tau_limit": tau_lim,
         "err_sync": e_sync,
-        "geom_dev": g_dev,
         "dist_goal": dist,
         "dW": dW,
         "qacc": L["QACC"],
@@ -578,13 +554,28 @@ def _run_source(
         "tau_rot": L["TAU_ROT"],
         **S,
     }
-    res["traj"].update(FF)
+    if g_dev is not None:
+        res["traj"]["geom_dev"] = g_dev
+    if environment is not None:
+        res["traj"].update(environment.trajectory(m, d))
     if clearance is not None:
         res["traj"]["clearance_m"] = clearance
     return res
 
 
-def run(case):
+def validate_config(cfg):
+    pc = cfg["pic"]
+    PICParams.from_cfg(pc)
+    for value, label in (
+        (pc["use_f"], "pic.use_f"),
+        (pc["torque_limit"]["clip"], "pic.torque_limit.clip"),
+        (pc["null_space"]["enabled"], "pic.null_space.enabled"),
+    ):
+        if not isinstance(value, bool):
+            raise ValueError(f"{label} must be a boolean")
+
+
+def run(case, *, compute_tracking: bool = True):
     """Configure the source PIC path from one resolved experiment."""
     pc = case.cfg["pic"]
     null = pc["null_space"]
@@ -598,4 +589,5 @@ def run(case):
         use_f=pc["use_f"],
         gravity_comp=pc["gravity_comp"],
         joint_friction_feedforward=pc["joint_friction_feedforward"],
+        compute_tracking=compute_tracking,
     )

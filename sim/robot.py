@@ -9,7 +9,6 @@ from scipy.spatial.transform import Rotation
 from .fr3_variants import FIXED_VARIANTS, MASS_VARIANTS
 
 MENAGERIE_DIR = str(Path(__file__).resolve().parents[1] / "vendor")
-TASK_DIMS = {"pos": 3, "axis5": 5, "full6": 6}
 TAU_MAX_DOC = {
     "FR3": (
         np.array([87.0, 87.0, 87.0, 87.0, 12.0, 12.0, 12.0]),
@@ -52,6 +51,7 @@ FR3 = RobotSpec(
 
 def _fr3_variant(name, filename, locked):
     """Keep physical references in original joint order after removing fixed joints."""
+    # Reduced array indices must still use the limits of the original named axes.
     indices = [i for i, joint in enumerate(FR3.joints) if joint not in locked]
     TAU_MAX_DOC[name] = (TAU_MAX_DOC["FR3"][0][indices], TAU_MAX_DOC["FR3"][1])
     return replace(
@@ -254,15 +254,11 @@ def nullspace_projector(J: np.ndarray) -> np.ndarray:
 def dls(J: np.ndarray, v: np.ndarray, eps: float, lam_max: float):
     U, S, Vt = np.linalg.svd(J, full_matrices=False)
     smin = float(S[-1])
+    # Damping grows below eps to limit amplification near a kinematic singularity.
     lam2 = 0.0 if smin >= eps else (1.0 - (smin / eps) ** 2) * lam_max**2
     denom = S**2 + lam2
     coef = np.where(denom > 0, S / np.where(denom > 0, denom, 1.0), 0.0)
     return (Vt.T @ (coef * (U.T @ v)), smin, lam2)
-
-
-def manipulability(J: np.ndarray) -> float:
-    S = np.linalg.svd(J, compute_uv=False)
-    return float(np.prod(S))
 
 
 def perp_basis(a: np.ndarray) -> np.ndarray:
@@ -337,6 +333,7 @@ def solve_qdot(
     qd[idx] = qd_f
     scale = float(np.max(np.abs(qd) / qd_max))
     if scale > 1.0:
+        # Uniform scaling preserves direction; clipping each joint would distort it.
         qd = qd / scale
     return (
         qd,
@@ -344,7 +341,6 @@ def solve_qdot(
             "sigma_min": smin,
             "lam2": lam2,
             "vel_scale": scale,
-            "manip": manipulability(Jf) if Jf.shape[0] <= Jf.shape[1] else 0.0,
         },
     )
 
@@ -433,6 +429,7 @@ def multistart_ik(
         elif criterion == "max_sigma_margin":
             ok = [s for s in conv if robot.limit_margin_pct(s[0]).min() > min_margin_pct]
             margin_ok = bool(ok)
+            # Margin is preferred, not required; retain converged solutions as fallback.
             pool = ok if ok else conv
             best = max(pool, key=lambda s: task_sigma_min(robot, s[0], tgt, free))
         else:
@@ -509,10 +506,12 @@ def position_servo_map(robot) -> ServoMap:
     )
 
 
-def gravity_torque(robot, q) -> np.ndarray:
+def gravity_torque(robot, q, *, data=None) -> np.ndarray:
     """Generalized gravity force g(q) (qfrc_bias at q_dot = 0) in robot joint order."""
-    d = mujoco.MjData(robot.model)
+    d = mujoco.MjData(robot.model) if data is None else data
     d.qpos[robot.qadr] = q
+    d.qvel[:] = 0.0
+    # Fresh data has zero velocity, so qfrc_bias contains no Coriolis contribution.
     mujoco.mj_forward(robot.model, d)
     return d.qfrc_bias[robot.dadr].copy()
 
@@ -601,6 +600,7 @@ def apply_plant(robot, plant: dict | None) -> dict:
     m.dof_damping[:] *= p["dof_damping_scale"]
     m.opt.gravity[:] = m.opt.gravity * p["gravity_scale"]
     m.body_mass[:] *= p["mass_scale"]
+    # mass_scale also scales inertia; inertia_scale adds an independent perturbation.
     m.body_inertia[:] *= p["mass_scale"] * p["inertia_scale"]
     com = None
     if p["com_shift"] is not None:
@@ -618,6 +618,7 @@ def apply_plant(robot, plant: dict | None) -> dict:
             "dxyz_m": p["com_shift"]["dxyz_m"],
             "ipos_after_m": m.body_ipos[b].tolist(),
         }
+    # Refresh MuJoCo's derived constants after changing mass, inertia or COM.
     mujoco.mj_setConst(m, mujoco.MjData(m))
     lim = torque_limit(robot.spec.name, p["torque_limit_scale"])
     if p["servo_enforce_torque_limit"]:

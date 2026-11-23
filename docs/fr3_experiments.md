@@ -130,10 +130,11 @@ precision are shown as zero.
 | `FR3_link7_mass_150pct` | `[0, -1.939149854, -0.001594399, 1.511289736, -0.008700530, 0.303264171, 0.001726077]` |
 | `FR3_link7_mass_200pct` | `[0, -3.878299709, -0.003188797, 3.022579472, -0.017401060, 0.606528341, 0.003452153]` |
 
-Recompute, or use `--q J1 J2 J3 J4 J5 J6 J7` for another common pose:
+Recompute with the local `tools/` checkout, or pass `--q J1 J2 J3 J4 J5 J6 J7`
+for another common pose.
 
 ```bash
-python -B -m evaluation.compare_fr3_mass --output results/fr3_mass_comparison.json
+python -B -m tools.compare_fr3_mass --output /tmp/fr3_mass_comparison.json
 ```
 
 The JSON records the exact pose, actually added compiled mass, full-precision
@@ -201,7 +202,7 @@ The validation report is saved at
 ## Local checks
 
 ```bash
-python -B -m sim.fr3_variants --check
+python -B -m tools.generate_fr3_variants --check
 python -B -m unittest tests.test_robot_models -v
 python -B -m unittest discover -s tests -v
 python -B main.py configs/dof/five_obstacle_pic_3dof.yaml --check

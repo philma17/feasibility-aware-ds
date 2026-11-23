@@ -11,95 +11,18 @@ Configuration selects the learned model, controller, task start, planar or
 spatial embedding, simulation parameters, and physical plant settings.
 Start positions can use saved joint angles or the existing multistart IK.
 
-Both Five Obstacle configurations use `time_rate: 1.0` and `ds_speed_factor: 1.0`:
-the normalized dynamics are `dx_n/dt = f_n(x_n)`, and the embedded DS velocity is
-`L_m * E @ f_n(x_n)`. Position normalization and the `ps`/`vs` metadata are
-retained. Older Five Obstacle results used `time_rate: demo` (`vs/ps`); their
-time-synchronized references differ. Worm retains demonstration timing.
+The embedded DS velocity is
+`L_m * E @ f_n(x_n)`
 
 ## Robot models
 
 Select a model with `robot` in the experiment configuration or `--set robot=NAME`.
-The TCP is each model's native `attachment_site`, without an added tool offset.
-
-| Configuration name | Moving arm axes | Fixed joints | MJCF (relative to repository root) |
-| --- | ---: | --- | --- |
-| `FR3` | 7 | none | `vendor/franka_fr3/fr3.xml` |
-| `FR3_fixed_J5` | 6 | J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j5.xml` |
-| `FR3_fixed_J3` | 6 | J3 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3.xml` |
-| `FR3_fixed_J3_J5` | 5 | J3 = J5 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j5.xml` |
-| `FR3_fixed_J3_J7` | 5 | J3 = J7 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j7.xml` |
-| `FR3_fixed_J3_J5_J7` | 4 | J3 = J5 = J7 = 0 rad | `vendor/franka_fr3/fr3_fixed_j3_j5_j7.xml` |
-| `FR3_fixed_J3_J5_J6_J7` | 3 | J3 = J5 = J7 = 0; J6 = 2.5307 rad | `vendor/franka_fr3/fr3_fixed_j3_j5_j6_j7.xml` |
-| `UR5e` | 6 | none | `vendor/universal_robots_ur5e/ur5e.xml` |
 
 The FR3 variants share `vendor/franka_fr3/assets/`. Fixed angles are the midpoints
-of the original MJCF joint ranges. Zero locks retain the original body
-transforms. The nonzero J6 lock is baked into its relative body transform
-before removing the hinge. The corresponding joint and
-actuator elements are removed and keyframes shortened; links, inertias and TCP
-are retained. IK, PIC and Servo therefore operate on only the remaining joints.
-Original joint names are preserved, including gaps after removing joints.
-`manifest.json:robot_model.joint_names` gives the column order of joint
-arrays; `controller.json` also records these names. `robot_model` records the
-fixed joints, limits, TCP and acceleration reference.
+of the original MJCF joint ranges.
 
-FR3 effort limits are selected by original joint name. UR5e uses its Menagerie
-actuator limits (150/150/150/28/28/28 N·m), velocity limits of pi rad/s, and native
-MJCF friction. No synthetic FR3 friction or FR3 acceleration-reference verdict
-is applied to UR5e; observed acceleration peaks, if logged, are still reported.
-Model provenance, licenses and local transformations are documented in the
-respective vendor `SOURCE.txt` files and the asset manifest.
 
-Check a different model through the normal initial-state path:
-
-```bash
-python -B main.py configs/five_obstacle_pic.yaml \
-  --set robot=FR3_fixed_J3_J5 --set task.q_start_rad=null --check
-```
-
-Set `task.q_start_rad=null` when switching robots to solve the start IK. Saved
-joint vectors must otherwise match the chosen model's active joint order.
-Batch execution already clears the fixed single-run joint vector before IK.
-Different robots solve their own joint vectors; paired PIC/Servo runs of the
-same robot use the same deterministic start IK.
-
-For comparable Five Obstacle/PIC batches, retain the supplied embedding, time
-rate, `multistart.seed=0` and nominal DS speed. These commands draw the same 100
-TCP starts as the existing nominal batch; each model solves its own start IK:
-
-```bash
-python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3 --runs 100 --output results/five_obstacle_pic_fr3_100
-python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J5 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j5_100
-python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J3 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j3_100
-python -B main.py configs/five_obstacle_pic.yaml --set robot=FR3_fixed_J3_J5 --runs 100 --output results/five_obstacle_pic_fr3_fixed_j3_j5_100
-python -B main.py configs/five_obstacle_pic.yaml --set robot=UR5e --runs 100 --output results/five_obstacle_pic_ur5e_100
-```
-
-Each output contains `starts.csv`, `start_NNN/`, `runs.csv` and `summary.md`.
-An unsolved IK or failed run remains in both tables. Output directories must be
-new. For position-servo comparisons use `configs/five_obstacle_servo.yaml` with
-the same robot and sampling settings, and a separate output directory.
-Only short single-run and two-start batch checks are automated for these robot
-variants; the 100-start commands are provided for manual execution.
-
-Independent full-7-DoF density variants are selected as `FR3_link3_mass_150pct`,
-`FR3_link3_mass_200pct`, `FR3_link7_mass_150pct`, and `FR3_link7_mass_200pct`.
-Each scales one link's inertial mass and all three principal inertias by 1.5 or
-2, retaining its COM frame and geometry. Simulation and nominal gravity
-compensation both load the selected MJCF; `plant.mass_scale: 1.0` and
-`pic.gravity_comp: nominal` are retained. PIC gains are unchanged.
-
-The separate [FR3 experiment guide](docs/fr3_experiments.md) lists the concrete
-`configs/dof/` and `configs/mass/` configurations, all 100-start commands,
-the common-pose gravity vectors and their per-joint changes. Reproduce them with:
-
-```bash
-python -B -m evaluation.compare_fr3_mass --output results/fr3_mass_comparison.json
-python -B -m sim.fr3_variants --check
-```
-
-The local model catalog, [configs/models.yaml](configs/models.yaml), contains
+[configs/models.yaml](configs/models.yaml), contains
 these packages supported by the source loaders:
 
 | Dataset | Selectable models |
@@ -108,18 +31,9 @@ these packages supported by the source loaders:
 | 2D_Shapes | Five_Obstacle_DS |
 | 3D_Shapes | Cshape_bottom |
 
-LASA MAT, 2D CSV, and 3D MAT normalization and the source float64 vector-field
-evaluation are retained. The four LASA `_benchmark` packages lack a source
-demonstration mapping and are explicitly rejected. Package loading has been
-checked for all 11 selectable models; this does not establish robot execution
-performance for every model.
-
 ## Quick Start
 
 Use a Python environment with the dependencies in [requirements.txt](requirements.txt).
-The commands below were checked with Python 3.14.4 and the recorded dependency
-versions. Checkpoints, demonstrations, and upstream metadata must be provisioned
-locally under ignored `data/`; they are not included in a fresh Git clone.
 
 From the repository root, list models and check the Worm inputs without stepping:
 
@@ -162,19 +76,7 @@ python -B -m evaluation.plots results/worm_pic \
   --barrier-model /path/to/LASA/Worm/model_b.pth
 ```
 
-This writes `results/worm_pic/plots/trajectory.png`. The plotting path has been
-checked on saved local runs. It reads `P_ideal` and `P` from `traj.npz` and shows
-world coordinates in millimeters, with equal axis scaling. For the horizontal
-Worm setup, these are world x and y. The model goal is marked; the barrier
-region and its zero contour are green, and configured obstacles are red.
-The dashed model box is `domain.range` (X); both the green fill and B=0 contour
-are restricted to that box. `plotting.range` only controls the surrounding view.
-Plotting also writes `plots/barrier.json` with separate ideal-DS and TCP sample
-checks and prints the first observed B>0-inside-X and box-exit times.
-The matching `model_b.pth` can also be provisioned beside `model_f.pth`, in which
-case `--barrier-model` may be omitted. The plot records its additional barrier
-input and hash in the PNG metadata. Spatial tasks without a two-dimensional
-task plane are rejected explicitly.
+This writes `results/worm_pic/plots/trajectory.png`.
 
 For a batch with `runs.csv`, select starts by repeated ID or by a saved event:
 
@@ -401,3 +303,9 @@ Third-party source notices are in [vendor/S2NNDS](vendor/S2NNDS/SOURCE.txt) and
 [vendor/franka_fr3](vendor/franka_fr3/SOURCE.txt), alongside the
 [FR3 asset license](vendor/franka_fr3/LICENSE). UR5e provenance and license are
 in [vendor/universal_robots_ur5e](vendor/universal_robots_ur5e/SOURCE.txt).
+
+## TCP force-pulse experiment
+
+The shared environment-force hook, historical audit, paired PIC experiment,
+reproduction commands, and result locations are documented in
+[docs/tcp_push_experiment.md](docs/tcp_push_experiment.md).

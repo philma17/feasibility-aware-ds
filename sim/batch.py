@@ -13,7 +13,7 @@ import traceback
 import numpy as np
 import yaml
 
-from evaluation.aggregate import aggregate
+from evaluation.run_artifacts import write_json
 from sim.ds import MULTISTART_DEFAULT, load_scenario, sample_starts
 
 START_FIELDS = (
@@ -31,13 +31,10 @@ START_FIELDS = (
 )
 
 
-def write_json(path, value):
-    path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-
-
 def start_config(cfg, count, index):
     """Replace the nominal single start with indexed sampling and the existing start IK."""
     child = deepcopy(cfg)
+    # This count controls sampled TCP targets; sim.n_starts controls IK candidates.
     child["multistart"] = {**MULTISTART_DEFAULT, **(cfg.get("multistart") or {}), "n_starts": count}
     child["task"]["start"] = {"index": index}
     child["task"]["q_start_rad"] = None
@@ -115,14 +112,20 @@ def refresh_start(output, row):
         row.update(status="invalid_manifest", error=str(exc))
 
 
-def run_batch(cfg, output, count, run_single, *, hashes, command_line):
+def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate_runs=None):
     """Keep failed and unattempted starts in the same plan and final table."""
+    if aggregate_runs is None:
+        from evaluation.aggregate import aggregate
+
+        aggregate_runs = aggregate
     rows = plan_starts(cfg, count)
     output = Path(output)
     if output.exists():
+        # No resume path: reusing a directory could mix different experiments.
         raise ValueError(f"Output directory already exists: {output}")
     output.mkdir(parents=True, exist_ok=False)
     starts = output / "starts.csv"
+    # Persist the full plan first so interrupted batches retain unattempted starts.
     write_starts(starts, rows)
     (output / "batch_config.yaml").write_text(
         yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
@@ -185,7 +188,7 @@ def run_batch(cfg, output, count, run_single, *, hashes, command_line):
         for row in rows:
             refresh_start(output, row)
         write_starts(starts, rows)
-        csv_path, table, _ = aggregate(output)
+        csv_path, table, _ = aggregate_runs(output)
         report.update(
             status="complete" if completed else "incomplete",
             complete_runs=sum(row["status"] == "complete" for row in table),

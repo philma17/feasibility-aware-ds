@@ -32,6 +32,7 @@ def load_torch_reference(path):
     adapter = ROOT / "vendor/S2NNDS/NNModels.py"
     spec = importlib.util.spec_from_file_location("NNModels", adapter)
     module = importlib.util.module_from_spec(spec)
+    # Pickled checkpoints resolve their original classes by this exact module name.
     sys.modules["NNModels"] = module
     spec.loader.exec_module(module)
     model = torch.load(path, map_location="cpu", weights_only=False)
@@ -56,10 +57,12 @@ class PthMLP:
         for i, layer in enumerate(m.layers_f):
             if layer.bias is not None:
                 raise ValueError("Unexpected bias in checkpoint layer")
+            # NumPy uses row vectors; checkpoints store weights for column vectors.
             self.ops.append(("matmul", layer.weight.detach().double().numpy().T))
             if i < len(m.layers_f) - 1:
                 self.ops.append(("elu", 1.0) if act is None else ("act", act))
             else:
+                # Output Tanh is fixed, regardless of the hidden-layer activation.
                 self.ops.append(("act", "Tanh"))
 
     def __call__(self, x: np.ndarray) -> np.ndarray:
@@ -67,10 +70,6 @@ class PthMLP:
         for typ, p in self.ops:
             if typ == "matmul":
                 y = y @ p
-            elif typ == "affine":
-                y = y @ p[0] + p[1]
-            elif typ == "add":
-                y = y + p
             elif typ == "elu":
                 y = np.where(y > 0, y, p * (np.exp(np.minimum(y, 0.0)) - 1.0))
             else:
@@ -81,8 +80,6 @@ class PthMLP:
 _ACT = {
     "Tanh": np.tanh,
     "Relu": lambda x: np.maximum(x, 0.0),
-    "Sin": np.sin,
-    "Softplus": lambda x: np.logaddexp(0.0, x),
 }
 
 
@@ -97,11 +94,7 @@ class LearnedDS:
         return self.f(np.asarray(x_n, float).reshape(1, -1))[0]
 
     def rollout_ideal(self, x0_n, dt: float, n_steps: int, rate: float) -> np.ndarray:
-        X = np.empty((n_steps + 1, 2))
-        X[0] = x0_n
-        for k in range(n_steps):
-            X[k + 1] = X[k] + dt * rate * self.f_n(X[k])
-        return X
+        return ideal_rollout(self, x0_n, dt, n_steps, rate)
 
 
 @dataclass(frozen=True)
@@ -131,18 +124,21 @@ def lasa_scaling(shape: str, demo_path) -> LasaScaling:
     return LasaScaling(shape, ps, vs, x0, [d.pos.T / ps for d in ds.demos], float(ds.dt))
 
 
+def demo_files(package):
+    """Match the 2D source loader's filename order for both reading and hashing."""
+    demos = package["demos"]
+    return sorted(demos, key=lambda path: Path(path).name) if package["dataset"] == "2D_Shapes" else demos
+
+
 def shape_scaling(dataset: str, name: str, package) -> LasaScaling:
     if dataset == "LASA":
         return lasa_scaling(package["demo_name"], input_path(package["demos"][0]))
     cfg = json.loads(input_path(package["metadata"]).read_text())
     pos, vel = ([], [])
     if dataset == "2D_Shapes":
-        folder = input_path(package["demos"][0]).parent
         sub = cfg["hyperparameters"].get("subsample", 10)
-        for f in sorted(p.name for p in folder.iterdir()):
-            if not f.endswith(".csv"):
-                continue
-            df = pd.read_csv(folder / f)
+        for demo in demo_files(package):
+            df = pd.read_csv(input_path(demo))
             p = np.vstack([df.x, df.y])[:, ::sub]
             v = np.vstack([df.dx, df.dy])[:, ::sub]
             pos.append(p - p[:, -1:])
@@ -181,6 +177,7 @@ class PlanarEmbedding:
         self.origin = np.asarray(self.origin, float)
         self.e1 = np.asarray(self.e1, float) / np.linalg.norm(self.e1)
         e2 = np.asarray(self.e2, float)
+        # Orthonormal axes keep L as the only spatial scale.
         e2 = e2 - e2 @ self.e1 * self.e1
         self.e2 = e2 / np.linalg.norm(e2)
         self.normal = np.cross(self.e1, self.e2)
@@ -201,6 +198,7 @@ class PlanarEmbedding:
 
 
 def demo_time_rate(sc: LasaScaling) -> float:
+    # Position and velocity were normalized separately; their ratio restores time.
     return sc.vs_mm_s / sc.ps_mm
 
 
@@ -260,11 +258,8 @@ def check_dims(ds, emb, x0_n) -> int:
 
 
 def ideal_rollout(ds, x0_n, dt: float, n_steps: int, rate: float) -> np.ndarray:
-    """Explicit Euler of the ideal DS, (n_steps+1, dim). For 2D this calls
-    LearnedDS.rollout_ideal (unchanged reference); the same scheme for other dimensions."""
+    """Integrate the ideal DS with explicit Euler and return (n_steps + 1, dim)."""
     x0_n = np.asarray(x0_n, float)
-    if len(x0_n) == 2:
-        return ds.rollout_ideal(x0_n, dt, n_steps, rate)
     X = np.empty((n_steps + 1, len(x0_n)))
     X[0] = x0_n
     for k in range(n_steps):
