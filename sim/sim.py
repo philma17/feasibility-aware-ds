@@ -123,9 +123,14 @@ def build_case(
                 "task.out_of_plane_offset_m needs a 2D model (planar embedding); 3D models already use all three Cartesian components"
             )
         p0 = p0 + offset * emb.normal
-    if t.get("q_start_rad") is not None:
+    q_start = t.get("q_start_rad")
+    q_start_robot = t.get("q_start_robot")
+    if q_start is not None and q_start_robot is not None:
+        if ROBOTS[q_start_robot].joints != robot.spec.joints:
+            q_start = None
+    if q_start is not None:
         # Preserve a supplied IK branch; report its TCP error without re-solving it.
-        q0 = np.asarray(t["q_start_rad"], float)
+        q0 = np.asarray(q_start, float)
         if q0.shape != (robot.n,):
             raise ValueError(f"task.q_start_rad needs {robot.n} values")
         if np.any(q0 < robot.q_min) or np.any(q0 > robot.q_max):

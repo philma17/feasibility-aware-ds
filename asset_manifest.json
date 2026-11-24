@@ -40,7 +40,16 @@
       "FR3_link3_mass_150pct",
       "FR3_link3_mass_200pct",
       "FR3_link7_mass_150pct",
-      "FR3_link7_mass_200pct"
+      "FR3_link7_mass_200pct",
+      "FR3_fixed_J1",
+      "FR3_fixed_J2",
+      "FR3_fixed_J4",
+      "FR3_fixed_J6",
+      "FR3_fixed_J7",
+      "FR3_fixed_J1_J3",
+      "FR3_fixed_J2_J3",
+      "FR3_fixed_J1_J5",
+      "FR3_fixed_J5_J6_J7"
     ]
   },
   "assets": [
@@ -360,8 +369,8 @@
       "path": "vendor/franka_fr3/SOURCE.txt",
       "role": "vendor_provenance_note",
       "versioned": true,
-      "bytes": 2725,
-      "sha256": "0146a46f8f593292177bb5dc6538dfeaac1ad29380a4b5e685e5f83cd92f1528",
+      "bytes": 3190,
+      "sha256": "856fe63dea2b525823e8e20e96b0f897199cca7e0ca68da8d9c9e0b8fc897c07",
       "source": "Written for this migration from the inspected source provenance records."
     },
     {
@@ -923,6 +932,78 @@
       "source": "See vendor/franka_fr3/SOURCE.txt",
       "bytes": 8868,
       "sha256": "144c57e859624ab441df20a2346e887f8a91d51e814a80685577455036458110"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j1.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8665,
+      "sha256": "15a518d46db713ba268d4d621faf30c6d5cd19ddd5e78090ce839e79d818cd36"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j2.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8663,
+      "sha256": "fa53cb515ba9c91e8b02af55233a3380a1cea22e9a6936a89f608ae4b6fa6ebf"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j4.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8731,
+      "sha256": "1291964ab43f17e0eb014820b322b9d37a2b79220f2505b0a115454c46c7a410"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j6.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8670,
+      "sha256": "266c44843c1350575f2a0b2d81b5481005f7174200f46c3f0565f01c3c7cf7dc"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j7.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8579,
+      "sha256": "0c302dc6c760a905a5c88f3b68270b5af021189617a2c2f89b7032416c45d535"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j1_j3.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8477,
+      "sha256": "7ceda5cd6e7702719903608ce7e205aca073f87582f15f9f405d5aceaefcd485"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j2_j3.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8475,
+      "sha256": "81785b6fcc6fbc7a0ee207024ade39d186946cefad4f999025df3dfd2fb48706"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j1_j5.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8415,
+      "sha256": "7bfad3ff4902188bafad7e0553f1bac1c595578579b703dd3e42aabb557d98cb"
+    },
+    {
+      "path": "vendor/franka_fr3/fr3_fixed_j5_j6_j7.xml",
+      "role": "robot_asset",
+      "versioned": true,
+      "source": "See vendor/franka_fr3/SOURCE.txt",
+      "bytes": 8150,
+      "sha256": "fb3e91615c56f35be083eacac32a8dd8ebeffa3d17e6807e64c1456c7432e5ec"
     }
   ],
   "source_code_sha256": {

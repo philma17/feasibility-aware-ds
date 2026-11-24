@@ -41,6 +41,7 @@ task:
     - -0.9476744186046513
     - -0.04360465116279066
   orientation: none
+  q_start_robot: FR3  # Use this vector for matching joint layouts; otherwise solve start IK.
   q_start_rad:
   - -0.004927134013296449
   - -0.24608420067957487
