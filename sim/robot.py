@@ -1,4 +1,4 @@
-"""Registered arm models, kinematics, physical parameters, actuator mapping, and IK."""
+"""Arm models, kinematics, physical parameters, actuator mapping, and IK."""
 
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
