@@ -25,4 +25,5 @@ htmlcov/
 
 # Local documentation and tests
 /docs/
-/tests/
+/tests/*
+!/tests/test_starts.py

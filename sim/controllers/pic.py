@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import mujoco
 import numpy as np
 from sim.ds import check_dims, ideal_rollout
-from sim.robot import rot_error, plane_component, gravity_torque, TAU_MAX_DOC
+from sim.robot import rot_error, plane_component, gravity_torque, scaled_sigma_min, TAU_MAX_DOC
 from sim.sim import Case, execute_intervals, first_contact_at
 from evaluation.metrics import tracking_metrics
 from . import Command
@@ -328,6 +328,7 @@ def _run_source(
         "E_rot",
         "ori_err",
         "sigma_min_trans",
+        "sigma_min_task",
     )
     S = {k: np.zeros(N + 1) for k in sc_keys}
     old_flags = int(m.opt.disableflags)
@@ -342,6 +343,8 @@ def _run_source(
         q = d.qpos[robot.qadr].copy()
         qd = d.qvel[robot.dadr].copy()
         p, R = robot.fk(q)
+        if k == 0:
+            case.observe_start(q, qd, p)
         J6 = robot.jac()
         Jp = J6[:3]
         S["sigma_min_trans"][k] = np.linalg.svd(Jp, compute_uv=False)[-1]
@@ -349,10 +352,18 @@ def _run_source(
         omega = J6[3:] @ qd
         if R_ref is None:
             R_ref = orient.R_des if orient is not None and orient.mode == "hold" else R.copy()
-        e_rot = rot_error(R, R_ref)
+        basis = None
+        if case.tgt.mode == "axis5":
+            e_rot, basis = case.tgt.tilt(R)
+            J_task = np.vstack([Jp, basis.T @ J6[3:]])
+        else:
+            e_rot = rot_error(R, R_ref)
+            J_task = J6 if orient is not None else Jp
+        diagnostic_rows = emb.E.T @ Jp if case.position_mode == "xy" else J_task
+        S["sigma_min_task"][k] = scaled_sigma_min(diagnostic_rows, sp.sigma_rotation_length_m)
         S["ori_err"][k] = float(np.linalg.norm(e_rot))
         L["OMEGA"][k] = omega
-        if orient is not None and orient.mode == "hold":
+        if orient is not None and orient.mode in ("hold", "axis5"):
             S["E_rot"][k] = 0.5 * orient.K_r * float(e_rot @ e_rot)
         x_n, dp = emb.to_plane(p)
         # Feedback evaluates the DS at the measured TCP, not along the ideal rollout.
@@ -374,23 +385,20 @@ def _run_source(
         S["f_norm"][k] = float(np.linalg.norm(f))
         if k == N:
             S["s"][k] = ctrl.s
-        return (q, qd, J6, Jp, xd, omega, e_rot, f)
+        return (q, qd, J6, J_task, xd, omega, e_rot, basis, f)
 
     def command(k, state):
-        q, qd, J6, Jp, xd, omega, e_rot, f = state
+        q, qd, J6, J_task, xd, omega, e_rot, basis, f = state
         out = ctrl.step(plane_component(xd, emb) if case.position_mode == "xy" else xd, f, dt)
         if case.position_mode == "xy":
             out["F"] = plane_component(out["F"], emb)
         g = gravity_torque(g_robot, q, data=gravity_data)
+        Nproj, nd = null_projector(J_task)
         if orient is None:
-            Nproj, nd = null_projector(Jp)
-            tau_task = Jp.T @ out["F"]
+            tau_task = J_task.T @ out["F"]
         else:
-            tau_rot = -orient.D_r @ omega
-            if orient.mode == "hold":
-                tau_rot = tau_rot + orient.K_r * e_rot
+            tau_rot = orient.torque(omega, e_rot, basis)
             L["TAU_ROT"][k] = tau_rot
-            Nproj, nd = null_projector(J6)
             tau_task = J6.T @ np.concatenate([out["F"], tau_rot])
         tau_null = -null_d_q * (Nproj @ qd) if null_d_q > 0 and nd > 0 else np.zeros(n)
         tau_cmd = g + tau_task + tau_null
@@ -424,13 +432,12 @@ def _run_source(
         m.opt.disableflags = old_flags
         d.qfrc_applied[:] = 0.0
     P, Q, QD = (L["P"], L["Q"], L["QD"])
+    times = np.arange(N + 1) * dt
+    mt = {"status": "not_requested"}
     if compute_tracking:
-        mt, e_sync, g_dev = tracking_metrics(P, P_id, goal, emb.L, dt, sp.success_frac)
-    else:
-        # Optional postprocessing only; the physics and control schedule are identical.
-        mt = {"status": "not_requested"}
-        e_sync = np.linalg.norm(P - P_id, axis=1)
-        g_dev = None
+        mt, e_sync, g_dev = tracking_metrics(
+            P, P_id, goal, emb.L, times, sp.success_frac, emb.origin, emb.E
+        )
     dist = np.linalg.norm(P - goal, axis=1)
     reached = np.flatnonzero(dist < sp.success_frac * emb.L)
     # Terminal command rows are padding; only N intervals actually apply torque.
@@ -520,19 +527,19 @@ def _run_source(
         "finite": bool(np.all(np.isfinite(Q)) and np.all(np.isfinite(QD))),
     }
     if orient is not None:
-        res["orientation"].update(
-            K_r=orient.K_r,
-            zeta=orient.zeta,
-            D_r=orient.D_r.tolist(),
-            Lambda_r_start=orient.Lambda_r.tolist(),
-            R_des=orient.R_des.tolist(),
-        )
+        res["orientation"].update(K_r=orient.K_r, D_r=orient.D_r.tolist())
+        if orient.mode == "axis5":
+            res["orientation"].update(reference="tool axis", axis_local=case.tgt.axis_local,
+                                      direction_world=case.tgt.a_des)
+        else:
+            res["orientation"].update(zeta=orient.zeta, Lambda_r_start=orient.Lambda_r.tolist(),
+                                      R_des=orient.R_des.tolist())
     clearance = None
     if case.unsafe is not None:
         clearance = emb.L * case.unsafe.signed_distance(L["Xn"])
         res["clearance_min_m"] = float(clearance.min())
     res["traj"] = {
-        "t": np.arange(N + 1) * dt,
+        "t": times,
         "P": P,
         "P_ideal": P_id,
         "Xn": L["Xn"],
@@ -546,7 +553,6 @@ def _run_source(
         "tau_applied": L["TAU_APP"],
         "tau_grav": L["TAU_G"],
         "tau_limit": tau_lim,
-        "err_sync": e_sync,
         "dist_goal": dist,
         "dW": dW,
         "qacc": L["QACC"],
@@ -554,8 +560,8 @@ def _run_source(
         "tau_rot": L["TAU_ROT"],
         **S,
     }
-    if g_dev is not None:
-        res["traj"]["geom_dev"] = g_dev
+    if compute_tracking:
+        res["traj"].update(err_sync_plane=e_sync, geom_dev_plane=g_dev)
     if environment is not None:
         res["traj"].update(environment.trajectory(m, d))
     if clearance is not None:

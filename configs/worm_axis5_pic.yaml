@@ -1,0 +1,94 @@
+# LASA/Worm, XYZ plus pen direction. The attachment site is the virtual tip.
+model_source: pth
+time_rate: demo  # Restore demonstration timing with vs / ps.
+robot: FR3
+sim:
+  dt: 0.001
+  T_max: 20.0
+  success_frac: 0.01  # Goal radius = success_frac * L_m; here 1 mm.
+  k_perp: 5.0
+  k_rot: 5.0
+  n_starts: 32  # IK candidates per TCP target, independent of --runs.
+  seed: 73  # IK seed; separate from multistart.seed below.
+  start_criterion: closest_to_reference
+  start_position_tol_m: 1.0e-6
+  start_orientation_tol_rad: 1.0e-6
+  sigma_rotation_length_m: 0.1
+  ik:
+    eps: 0.02
+    lam_max: 0.05
+    k_null: 0.0
+  clear_every: 10
+task:
+  mode: pos
+  plane:
+    e1:
+    - 1.0
+    - 0.0
+    - 0.0
+    e2:
+    - 0.0
+    - 1.0
+    - 0.0
+  center:
+  - 0.5
+  - 0.0
+  - 0.5
+  anchor:
+  - 0.0
+  - 0.0
+  L_m: 0.1
+  start:
+    x0:
+    - -0.9476744186046513
+    - -0.04360465116279066
+  orientation: axis5
+  orientation_gains: {K_r: 50.0, D_tilt: 5.0}  # Nm/rad and Nm s/rad in the two tilt directions.
+  tool_axis_local: [0.0, 0.0, 1.0]  # From the wrist along the attachment site +Z.
+  tool_direction_world: inward_plane_normal
+  position_mode: xyz
+  out_of_plane_offset_m: 0.0
+plant:
+  friction_enabled: true
+  dof_frictionloss_scale: 1.0
+  dof_damping_scale: 1.0
+  gravity_scale: 1.0
+  mass_scale: 1.0
+  inertia_scale: 1.0
+  torque_limit_scale: 1.0
+  servo_enforce_torque_limit: true
+  synthetic_friction: null
+  com_shift: null
+pic:
+  decomposition: none
+  lambda:
+  - 1600.0
+  - 1600.0
+  - 1600.0
+  s_max: 10.0
+  s0: 5.0  # Initial tank energy [J]; half of the 10 J capacity.
+  delta_s_frac: 0.1
+  delta_z: 0.01
+  eta: 1.0e-06  # Keep the damping basis below this DS speed [m/s].
+  step: quintic
+  null_space:
+    enabled: true
+    d_q: 5.0
+  torque_limit:
+    source: documented
+    clip: true
+  gravity_comp: nominal  # Selected MJCF before in-memory plant perturbations.
+  joint_friction_feedforward:
+    enabled: false
+  use_f: true
+disturbance:
+  enabled: false
+  pulses: []
+ds_speed_factor: 1.0
+model: LASA/Worm
+model_catalog: configs/models.yaml
+controller: pic
+spatial: null
+multistart:
+  seed: 0
+  n_starts: 20  # Indexed TCP sample count; --runs overrides it.

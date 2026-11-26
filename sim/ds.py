@@ -358,6 +358,7 @@ def load_scenario(cfg: dict) -> dict:
         "emb": emb,
         "unsafe": unsafe if unsafe.supported else None,
         "unsafe_info": unsafe.describe(),
+        "obstacle_level": unsafe.level_set,
         "s2nnds_config": s2_path if s2 is not None else None,
         "domain": dom,
         "init_box": box,

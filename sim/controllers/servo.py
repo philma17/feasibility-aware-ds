@@ -8,6 +8,7 @@ from sim.robot import (
     rot_error,
     solve_qdot,
     servo_task_rows,
+    scaled_sigma_min,
     validate_position_mode,
     position_servo_map,
     gravity_torque,
@@ -35,6 +36,7 @@ def _run_source(
     tau_limit=None,
     position_mode="xyz",
     pulses=(),
+    observe_start=None,
 ) -> dict:
     """Execute the native position servo from the resolved joint start.
 
@@ -88,6 +90,7 @@ def _run_source(
     ori = np.zeros(N + 1)
     dperp = np.zeros(N + 1)
     smin = np.full(N, np.inf)
+    task_sigma = np.empty(N + 1)
     vscale = np.zeros(N)
     ncon = np.zeros(N, int)
     n_vel_scale = n_qdes_clip = n_damped = 0
@@ -100,6 +103,8 @@ def _run_source(
         q = d.qpos[robot.qadr].copy()
         qd_meas = d.qvel[robot.dadr].copy()
         p, R = robot.fk(q)
+        if k == 0 and observe_start is not None:
+            observe_start(q, qd_meas, p)
         R0 = R if R0 is None else R0
         x_n, dp = emb.to_plane(p)
         P[k], Xn[k], Q[k], QD[k], QDES[k], dperp[k] = (p, x_n, q, qd_meas, q_des, dp)
@@ -107,6 +112,7 @@ def _run_source(
         if position_mode == "xyz":
             v_lin = v_lin - sp.k_perp * dp * emb.normal
         Jt, vt, oe = servo_task_rows(robot.jac(), R, tgt, v_lin, sp.k_rot, emb, position_mode)
+        task_sigma[k] = scaled_sigma_min(Jt[:, free], sp.sigma_rotation_length_m)
         ori[k] = oe if tgt.mode != "pos" else float(np.linalg.norm(rot_error(R, R0)))
         return (q, qd_meas, Jt, vt)
 
@@ -227,6 +233,8 @@ def _run_source(
         "tau_applied": TAU_APP,
         "vel_scale": vscale,
         "ncon": ncon,
+        "ori_err": ori,
+        "sigma_min_task": task_sigma,
         "tau_limit": tau_doc,
     }
     res["traj"]["F_ext"] = np.asarray([
@@ -254,5 +262,6 @@ def run(case):
         n_substeps=1,
         tau_limit=case.tau_limit,
         position_mode=case.position_mode,
+        observe_start=case.observe_start,
         pulses=case.cfg["disturbance"]["pulses"] if case.cfg["disturbance"]["enabled"] else (),
     )

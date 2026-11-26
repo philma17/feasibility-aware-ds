@@ -1,4 +1,4 @@
-"""Source tracking and clearance definitions; MSE sums world-coordinate errors."""
+"""Tracking in task coordinates and clearance in the model domain."""
 
 from __future__ import annotations
 import numpy as np
@@ -164,6 +164,21 @@ class UnsafeSet:
         else:
             self.reason = f"unsafe shape '{self.shape}' not supported"
 
+        # The two vendored custom level sets support membership, in dimensionless units.
+        self.level_set = self.signed_distance if self.supported else None
+        if self.shape == "Custom" and dim == 2:
+            expression = "".join(self.spec.get("function", "").split())
+            if expression == "(((x+0.3)/6)**2)**(1/3)+(((y-0.4)/3)**2)**(1/3)-0.15":
+                def level(points):
+                    x, y = points.T
+                    return (((x + 0.3) / 6)**2)**(1/3) + (((y - 0.4) / 3)**2)**(1/3) - 0.15
+                self.level_set = level
+            elif expression == "torch.max(torch.max(y,-4*x-0.8*y-1.6),-0.8*y+4*x+0.8)":
+                def level(points):
+                    x, y = points.T
+                    return np.maximum.reduce((y, -4*x - 0.8*y - 1.6, 4*x - 0.8*y + 0.8))
+                self.level_set = level
+
     def signed_distance(self, X):
         """X (N, dim) normalized -> (N,) signed distance in normalized units."""
         X = np.atleast_2d(np.asarray(X, float))
@@ -192,38 +207,53 @@ class UnsafeSet:
         return d
 
 
-def tracking_metrics(P, P_id, goal, L, dt, success_frac) -> tuple[dict, np.ndarray, np.ndarray]:
-    """Shared task-space metrics for both execution modes (world frame, metres).
-
-    time-synchronized error e_k = ||P_k - P_id,k||, P_id,k = ideal DS Euler rollout at the same
-    t_k = k dt from the same start x0 (open-loop reference, NOT re-anchored at the robot).
-    geometric deviation g_k = distance of P_k to the ideal path polyline (timing-invariant)."""
-    e = np.linalg.norm(P - P_id, axis=1)
-    g = point_to_polyline(P, P_id)
-    ch_mean, ch_max = chamfer(P, P_id)
+def tracking_metrics(
+    P, P_id, goal, L, times, success_frac, origin, axes, *, window_radius_m=None
+) -> tuple[dict, np.ndarray, np.ndarray]:
+    """Measure tracking in task coordinates, with RMS errors limited by ideal goal entry."""
+    if times is None or len(times) != len(P):
+        raise ValueError("Tracking requires one timestamp per trajectory sample")
+    plane, ideal_plane = (P - origin) @ axes, (P_id - origin) @ axes
+    e = np.linalg.norm(plane - ideal_plane, axis=1)
+    g = point_to_polyline(plane, ideal_plane)
+    ch_mean, ch_max = chamfer(plane, ideal_plane)
     dist_goal = np.linalg.norm(P - goal, axis=1)
-    thr = success_frac * L
-    reached = np.flatnonzero(dist_goal < thr)
-    return (
-        {
-            "final_goal_err_m": float(dist_goal[-1]),
-            "mse_sync_m2": float(np.mean(e**2)),
-            "rmse_sync_m": float(np.sqrt(np.mean(e**2))),
-            "max_err_sync_m": float(e.max()),
-            "t_max_err_sync_s": float(np.argmax(e) * dt),
-            "geom_dev_mean_m": float(g.mean()),
-            "geom_dev_max_m": float(g.max()),
-            "chamfer_mean_m": float(ch_mean),
-            "hausdorff_m": float(ch_max),
-            "frechet_m": frechet_discrete(P, P_id),
-            "t_reach_s": float(reached[0] * dt) if len(reached) else None,
-        },
-        e,
-        g,
-    )
+    radius = success_frac * L
+    reached = np.flatnonzero(dist_goal < radius)
+    ideal_radius = radius if window_radius_m is None else window_radius_m
+    ideal_reached = np.flatnonzero(np.linalg.norm(P_id - goal, axis=1) < ideal_radius)
+    window_end = ideal_reached[0] if len(ideal_reached) else len(times) - 1
+    window = slice(0, window_end + 1)
+    t_reach = float(times[reached[0]]) if len(reached) else None
+    t_reach_ideal = float(times[window_end]) if len(ideal_reached) else None
+    reach_delay = t_reach - t_reach_ideal if None not in (t_reach, t_reach_ideal) else None
+    mse = float(np.mean(e[window] ** 2))
+    metrics = {
+        "final_goal_err_m": float(dist_goal[-1]),
+        "mse_sync_plane_m2": mse,
+        "rmse_sync_plane_m": float(np.sqrt(mse)),
+        "max_err_sync_plane_m": float(e.max()),
+        "t_max_err_sync_plane_s": float(times[np.argmax(e)]),
+        "geom_dev_mean_plane_m": float(g.mean()),
+        "geom_dev_max_plane_m": float(g.max()),
+        "chamfer_mean_plane_m": float(ch_mean),
+        "hausdorff_plane_m": float(ch_max),
+        "frechet_plane_m": frechet_discrete(plane, ideal_plane),
+        "dtw_mean_plane_m": dtw_mean(plane, ideal_plane),
+        "t_reach_s": t_reach,
+        "t_reach_ideal_s": t_reach_ideal,
+        "mse_window_end_s": float(times[window_end]),
+        "reach_delay_s": reach_delay,
+    }
+    if axes.shape[1] == 2:
+        normal = np.cross(axes[:, 0], axes[:, 1])
+        perp = (P - P_id) @ normal
+        metrics.update(perp_rms_m=float(np.sqrt(np.mean(perp[window] ** 2))),
+                       perp_max_m=float(np.max(np.abs(perp))))
+    return metrics, e, g
 
 
-def summarize_trajectory(tr, cfg, manifest, tracking=None):
+def summarize_trajectory(tr, cfg, manifest, tracking=None, *, window_radius_m=None):
     """Evaluate logged samples using the coordinates and limits recorded by the producer."""
     metrics = {}
     times = tr.get("t")
@@ -233,24 +263,46 @@ def summarize_trajectory(tr, cfg, manifest, tracking=None):
     inputs = manifest.get("evaluation_inputs", {})
     if n is not None:
         metrics.update(n_intervals=n, n_states=len(times))
+    sigma = tr.get("sigma_min_task")
+    if sigma is not None and times is not None and sigma.shape == times.shape and np.isfinite(sigma).all():
+        metrics.update(sigma_min_start=float(sigma[0]), sigma_min_run=float(sigma.min()))
+    if cfg.get("task", {}).get("orientation") in ("axis5", "hold") and "ori_err" in tr:
+        error = tr["ori_err"]
+        if len(error) and np.isfinite(error).all():
+            metrics.update(max_ori_err_rad=float(error.max()), final_ori_err_rad=float(error[-1]))
     if "Q" in tr and "QD" in tr:
         metrics["finite"] = bool(np.isfinite(tr["Q"]).all() and np.isfinite(tr["QD"]).all())
     if measured is not None and len(measured) and np.isfinite(measured).all() and embedding is not None:
         scale = embedding["L_m"]
         anchor = np.asarray(embedding["anchor_n"], float)
         axes = np.asarray(embedding["axes"], float)
-        goal = np.asarray(embedding["origin"], float) + scale * ((np.zeros_like(anchor) - anchor) @ axes.T)
+        origin = np.asarray(embedding["origin"], float)
+        goal = origin - scale * (anchor @ axes.T)
         distance = np.linalg.norm(measured - goal, axis=1)
         sim = cfg["sim"]
         radius = sim["success_frac"] * scale
         metrics.update(success=bool(distance[-1] < radius), final_distance_m=float(distance[-1]))
-        if times is not None and len(times) == len(distance):
+        if ideal is not None and ideal.shape == measured.shape and len(ideal) > 1 and np.isfinite(ideal).all():
+            if tracking is None or window_radius_m is not None:
+                tracking, _, _ = tracking_metrics(
+                    measured, ideal, goal, scale, times, sim["success_frac"], origin, axes,
+                    window_radius_m=window_radius_m,
+                )
+            metrics.update(tracking)
+            if sim.get("start_criterion") != "closest_to_reference" and cfg.get("task", {}).get("orientation") != "axis5":
+                # Preserve the original full-horizon, world-coordinate measures for legacy configs.
+                error = np.linalg.norm(measured - ideal, axis=1)
+                deviation = point_to_polyline(measured, ideal)
+                chamfer_mean, hausdorff = chamfer(measured, ideal)
+                mse = float(np.mean(error**2))
+                metrics.update(mse_sync_m2=mse, rmse_sync_m=float(np.sqrt(mse)),
+                               max_err_sync_m=float(error.max()), t_max_err_sync_s=float(times[error.argmax()]),
+                               geom_dev_mean_m=float(deviation.mean()), geom_dev_max_m=float(deviation.max()),
+                               chamfer_mean_m=float(chamfer_mean), hausdorff_m=float(hausdorff),
+                               frechet_m=frechet_discrete(measured, ideal), dtw_mean_m=dtw_mean(measured, ideal))
+        elif times is not None and len(times) == len(distance):
             reached = np.flatnonzero(distance < radius)
             metrics["t_reach_s"] = float(times[reached[0]]) if len(reached) else None
-        if ideal is not None and ideal.shape == measured.shape and len(ideal) > 1 and np.isfinite(ideal).all():
-            if tracking is None:
-                tracking, _, _ = tracking_metrics(measured, ideal, goal, scale, sim["dt"], sim["success_frac"])
-            metrics.update(tracking, dtw_mean_m=dtw_mean(measured, ideal))
 
     limits = inputs.get("torque_limit_Nm", tr.get("tau_limit"))
     if n is not None and n > 0 and limits is not None:
@@ -289,7 +341,7 @@ def summarize_trajectory(tr, cfg, manifest, tracking=None):
     return metrics
 
 
-def evaluate_saved_run(directory, manifest=None, *, tracking=None):
+def evaluate_saved_run(directory, manifest=None, *, tracking=None, window_radius_m=None):
     """Compute derived metrics without constructing a live simulation case."""
     import json
     from pathlib import Path
@@ -315,4 +367,4 @@ def evaluate_saved_run(directory, manifest=None, *, tracking=None):
                 "unsafe": spec.get("unsafe"),
                 "clearance_status": unsafe.describe(),
             }}
-    return summarize_trajectory(trajectory, cfg, manifest, tracking)
+    return summarize_trajectory(trajectory, cfg, manifest, tracking, window_radius_m=window_radius_m)

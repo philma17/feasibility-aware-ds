@@ -8,6 +8,7 @@ import csv
 import json
 import math
 from pathlib import Path
+from tempfile import mkdtemp
 from zipfile import BadZipFile
 
 import numpy as np
@@ -17,19 +18,38 @@ from sim.robot import ROBOTS
 from evaluation.metrics import evaluate_saved_run
 from evaluation.run_artifacts import read_config, sha256
 
+TRACKING_METRICS = (
+    # Historical full-world, full-duration measurements retain their own names.
+    "mse_sync_m2", "dtw_mean_m", "max_err_sync_m", "geom_dev_max_m",
+    "mse_sync_plane_m2",
+    "rmse_sync_plane_m",
+    "max_err_sync_plane_m",
+    "geom_dev_mean_plane_m",
+    "geom_dev_max_plane_m",
+    "chamfer_mean_plane_m",
+    "hausdorff_plane_m",
+    "frechet_plane_m",
+    "dtw_mean_plane_m",
+    "perp_rms_m",
+    "perp_max_m",
+)
 METRICS = (
+    "sigma_min_start",
+    "sigma_min_run",
+    "max_ori_err_rad",
+    "final_ori_err_rad",
     "final_distance_m",
     "t_reach_s",
-    "mse_sync_m2",
-    "dtw_mean_m",
-    "max_err_sync_m",
-    "geom_dev_max_m",
+    "t_reach_ideal_s",
+    "mse_window_end_s",
+    "reach_delay_s",
+    *TRACKING_METRICS,
+    "t_max_err_sync_plane_s",
     "min_clearance_m",
     "domain_exit",
     "peak_applied_torque_ratio",
     "torque_saturation_steps",
 )
-TRACKING_METRICS = {"mse_sync_m2", "dtw_mean_m", "max_err_sync_m", "geom_dev_max_m"}
 EVENTS = (
     "goal_failure",
     "tracking_failure",
@@ -41,6 +61,12 @@ EVENTS = (
 )
 FIELDS = (
     "start_id",
+    "pair_id",
+    "member",
+    "initialization_status",
+    "task_orientation",
+    "sigma_rotation_length_m",
+    "config_sha256",
     "run_id",
     "run_dir",
     "status",
@@ -115,7 +141,7 @@ def load_evaluation(path):
     if not isinstance(cfg, dict) or set(cfg) - {"goal_threshold_m", "tracking_thresholds"}:
         raise ValueError("Evaluation YAML accepts goal_threshold_m and tracking_thresholds only")
     thresholds = cfg.get("tracking_thresholds", {})
-    if not isinstance(thresholds, dict) or set(thresholds) - TRACKING_METRICS:
+    if not isinstance(thresholds, dict) or set(thresholds) - set(TRACKING_METRICS):
         raise ValueError(f"Tracking thresholds must use saved metrics: {sorted(TRACKING_METRICS)}")
     values = list(thresholds.items())
     if "goal_threshold_m" in cfg:
@@ -150,9 +176,10 @@ def run_entries(batch_dir, starts):
                     raise ValueError(f"Empty start_id or run_dir in start CSV line {number}")
                 path = Path(directory)
                 path = (path if path.is_absolute() else batch_dir / path).resolve()
-                if start_id in ids or path in paths:
+                identity = (start_id, item.get("member"))
+                if identity in ids or path in paths:
                     raise ValueError(f"Duplicate start_id or run_dir in start CSV line {number}")
-                ids.add(start_id)
+                ids.add(identity)
                 paths.add(path)
                 entries.append((start_id, path))
             return entries, True
@@ -234,7 +261,7 @@ def raw_diagnostics(directory, manifest, override, notes):
     return result
 
 
-def summarize_run(start_id, directory, evaluation, *, recompute=False):
+def summarize_run(start_id, directory, evaluation, *, recompute=False, window_radius_m=None):
     notes = []
     row = dict.fromkeys(FIELDS)
     row.update(
@@ -276,13 +303,16 @@ def summarize_run(start_id, directory, evaluation, *, recompute=False):
         "evaluation_schema" in manifest or "trajectory_sha256" in manifest or "artifact_sha256" in manifest
     ):
         try:
-            metrics = evaluate_saved_run(directory, manifest)
+            metrics = evaluate_saved_run(directory, manifest, window_radius_m=window_radius_m)
             row["metrics_status"] = "recomputed"
         except (OSError, KeyError, ValueError, TypeError, EOFError, BadZipFile) as exc:
             metrics = {}
             row["metrics_status"] = "invalid"
             notes.append(f"Cannot evaluate saved run: {exc}")
     row["start_id"] = manifest.get("start_id", start_id)
+    for key in ("pair_id", "member", "initialization_status", "task_orientation",
+                "sigma_rotation_length_m", "config_sha256"):
+        row[key] = manifest.get(key)
     saved_config = manifest.get("config", {})
     for key in ("model", "robot", "controller"):
         row[key] = manifest.get(key, saved_config.get(key))
@@ -291,6 +321,8 @@ def summarize_run(start_id, directory, evaluation, *, recompute=False):
         row["pulse"] = json.dumps(pulse, sort_keys=True)
     for key in METRICS:
         row[key] = scalar(metrics, key, notes, boolean=(key == "domain_exit"))
+    if row["sigma_min_start"] is None:
+        row["sigma_min_start"] = scalar(manifest, "sigma_min_start", notes)
     row["finite"] = scalar(metrics, "finite", notes, boolean=True)
     row["barrier_exit"] = scalar(metrics, "barrier_exit", notes, boolean=True)
     if row["barrier_exit"] is not None:
@@ -315,6 +347,8 @@ def summarize_run(start_id, directory, evaluation, *, recompute=False):
         if override is not None:
             if row["final_distance_m"] is not None:
                 row["goal_failure"] = not row["final_distance_m"] < override
+            reached, ideal_reached = row["t_reach_s"], row["t_reach_ideal_s"]
+            row["reach_delay_s"] = reached - ideal_reached if None not in (reached, ideal_reached) else None
         else:
             success = scalar(metrics, "success", notes, boolean=True)
             row["goal_failure"] = None if success is None else not success
@@ -339,7 +373,7 @@ def summarize_run(start_id, directory, evaluation, *, recompute=False):
             row["obstacle_entry"] = row["min_clearance_m"] <= 0
     else:
         notes.append("Task decisions unavailable: run is not complete or has nonfinite states")
-        row.update(t_reach_s=None, goal_entry_status="unavailable")
+        row.update(t_reach_s=None, reach_delay_s=None, goal_entry_status="unavailable")
         if row["qacc_status"] == "available":
             row["qacc_status"] = "available_partial"
     if not thresholds:
@@ -407,7 +441,7 @@ def observed_torque_peak(directory):
         return None
 
 
-def write_summary(path, rows, barrier_reports=None):
+def write_summary(path, rows, barrier_reports=None, *, window_radius_mm=None):
     """Render compact millimeter statistics and keep checked and unavailable events distinct."""
     def number(value):
         return "NA" if value is None else f"{value:.9g}"
@@ -415,40 +449,57 @@ def write_summary(path, rows, barrier_reports=None):
     def ids(values, checked=True):
         return ", ".join(f"`{value}`" for value in values) or ("keine" if checked else "NA")
 
-    metrics = (("mse_sync_m2", "DS–TCP MSE", "mm²", 1e6),
-               ("dtw_mean_m", "DTW", "mm", 1e3),
-               ("geom_dev_max_m", "Max geometric deviation", "mm", 1e3))
+    tracking = (("mse_sync_plane_m2", "Windowed task-space MSE", "mm²", 1e6),
+                ("dtw_mean_plane_m", "Task-space DTW", "mm", 1e3),
+                ("geom_dev_max_plane_m", "Max task-space geometric deviation", "mm", 1e3))
+    goal = (("final_distance_m", "Final goal distance", "mm", 1e3),
+            ("t_reach_s", "Goal entry time", "s", 1),
+            ("reach_delay_s", "Reach delay", "s", 1))
+    radius = "`success_frac * L`" if window_radius_mm is None else f"{window_radius_mm:g} mm"
     statuses = Counter(row["status"] for row in rows)
     lines = [
         "# Run summary", "",
         f"Rows: {len(rows)}. Technical status: "
         + ", ".join(f"{status}={count}" for status, count in sorted(statuses.items())) + ".",
-        "n counts complete runs with finite=true and all three metrics available. "
-        "Values are mean ± sample SD (n−1; SD=NA for n<2). Raw CSV units remain unchanged.", "",
-        "| Model | Robot | Controller | n | DS–TCP MSE [mm²] | DTW [mm] | Max geometric deviation [mm] |",
-        "| --- | --- | --- | ---: | ---: | ---: | ---: |",
+        f"MSE, RMSE and perpendicular RMS use samples from time zero through the first ideal "
+        f"sample inside the goal radius ({radius}), or through the final sample when there is no entry.",
+        "Tracking n counts complete runs with finite=true and all three tracking metrics available. "
+        "Goal statistics use available values from complete runs with finite=true. "
+        "Reached n counts runs with a recorded goal entry time. "
+        "Values are mean ± sample SD (SD=NA for n<2).", "",
+        "| Model | Robot | Controller | Tracking n | Windowed task-space MSE [mm²] | Task-space DTW [mm] | "
+        "Max task-space geometric deviation [mm] | Final goal distance [mm] | Reached n | Goal entry time [s] | Reach delay [s] |",
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
-    groups = sorted({tuple(row.get(k) or "NA" for k in ("model", "robot", "controller"))
-                     for row in rows if row.get("model")}) or [("NA", "NA", "NA")]
+    def group_for(row):
+        label = row.get("controller") or "NA"
+        if row.get("member"):
+            label += " / " + row["member"]
+        return row.get("model") or "NA", row.get("robot") or "NA", label
+
+    groups = sorted({group_for(row) for row in rows if row.get("model")}) or [("NA", "NA", "NA")]
     extrema = []
     for group in groups:
-        valid = [row for row in rows
-                 if tuple(row.get(k) or "NA" for k in ("model", "robot", "controller")) == group
-                 and row["status"] == "complete" and row.get("finite") is True
-                 and all(finite_pairs([row], key) for key, _, _, _ in metrics)]
-        values = []
-        for key, label, unit, scale in metrics:
-            stats = metric_statistics(valid, key)
+        complete = [row for row in rows
+                    if group_for(row) == group
+                    and row["status"] == "complete" and row.get("finite") is True]
+        valid = [row for row in complete if all(finite_pairs([row], key) for key, _, _, _ in tracking)]
+        values = [str(len(valid))]
+        for metric in (*tracking, *goal):
+            key, label, unit, scale = metric
+            stats = metric_statistics(valid if metric in tracking else complete, key)
             mean = None if stats["mean"] is None else scale * stats["mean"]
             sd = None if stats["sd"] is None else scale * stats["sd"]
-            if not valid:
+            if key == "t_reach_s":
+                values.append(str(stats["n"]))
+            if mean is None:
                 values.append("NA")
             elif sd is None:
                 values.append(f"{mean:.3f} ± NA")
             else:
                 values.append(f"{mean:.3f} ± {sd:.3f}")
             extrema.append((group, label, unit, scale, stats))
-        lines.append("| " + " | ".join((*group, str(len(valid)), *values)) + " |")
+        lines.append("| " + " | ".join((*group, *values)) + " |")
     lines += ["", "| Metric | Unit | Minimum | Start ID(s) | Maximum | Start ID(s) |",
               "| --- | --- | ---: | --- | ---: | --- |"]
     for group, label, unit, scale, stats in extrema:
@@ -459,6 +510,19 @@ def write_summary(path, rows, barrier_reports=None):
         lines.append(f"| {label} | {unit} | {number(minimum)} | "
                      f"{ids(stats['min_ids'], bool(stats['n']))} | {number(maximum)} | "
                      f"{ids(stats['max_ids'], bool(stats['n']))} |")
+
+    legacy = [r for r in rows if r.get("mse_sync_m2") is not None and r.get("mse_sync_plane_m2") is None]
+    if legacy:
+        lines += ["", "Historical full-duration world-coordinate tracking (saved metric names)", "",
+                  "| Model / robot / controller | MSE [mm²] | DTW [mm] |",
+                  "| --- | ---: | ---: |"]
+        for group in sorted({group_for(r) for r in legacy}):
+            complete = [r for r in legacy if group_for(r) == group and r["status"] == "complete" and r["finite"]]
+            values = []
+            for key, factor in (("mse_sync_m2", 1e6), ("dtw_mean_m", 1e3)):
+                mean = metric_statistics(complete, key)["mean"]
+                values.append(number(None if mean is None else mean * factor))
+            lines.append("| " + " | ".join([" / ".join(group), *values]) + " |")
 
     torque_rows = [dict(row, torque_peak=observed_torque_peak(row["run_dir"])) for row in rows]
     lines += ["", "| Observed peak | Unit | n | Maximum | Start ID(s) |",
@@ -540,15 +604,49 @@ def write_summary(path, rows, barrier_reports=None):
               "Per-run counts, first times and input hashes are in barrier.json.",
               "Barrier evaluation status: " + (", ".join(f"{k}={v}" for k, v in sorted(barrier_statuses.items()))
               or "NA") + "."]
+    posture = [r for r in rows if r.get("member") in ("nominal", "lower_sigma") and r.get("pair_id")]
+    if posture:
+        lines += ["", "### Paired posture differences", "",
+                  "Differences are lower-sigma minus nominal for complete pairs with matching run settings.", "",
+                  "| Pair | Robot | Orientation | Rotation scale [m/rad] | Δ start σ | Δ minimum σ | "
+                  "Δ MSE [mm²] | Δ DTW [mm] | Goal success (nominal/lower) |",
+                  "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |"]
+        comparisons = {}
+        for r in posture:
+            key = (r["pair_id"], r["config_sha256"], r["robot"], r["task_orientation"], r["sigma_rotation_length_m"])
+            comparisons.setdefault(key, []).append(r)
+        for (pair, _, robot, task, scale), members in comparisons.items():
+            complete = {r["member"]: r for r in members if r["status"] == "complete" and r["finite"]}
+            values = ["NA"] * 5
+            if len(members) == len(complete) == 2:
+                a, b = complete["nominal"], complete["lower_sigma"]
+                keys = (("sigma_min_start", 1), ("sigma_min_run", 1),
+                        ("mse_sync_plane_m2", 1e6), ("dtw_mean_plane_m", 1e3))
+                values = [number((b[k] - a[k]) * factor) if None not in (a[k], b[k]) else "NA"
+                          for k, factor in keys]
+                values.append(f"{a['goal_success']}/{b['goal_success']}")
+            lines.append("| " + " | ".join([pair, robot or "NA", task or "NA", number(scale), *values]) + " |")
     technical = [row["start_id"] for row in rows if row["status"] != "complete"]
     lines += ["", "Runs with technical status other than complete: " + ids(technical) + ".", ""]
     Path(path).write_text("\n".join(lines), encoding="utf-8")
 
 
-def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_model=None, recompute=False):
+def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_model=None,
+              recompute=False, window_radius_mm=None):
     batch_dir = Path(batch_dir).resolve()
     if not batch_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {batch_dir}")
+    window_radius_m = None
+    if window_radius_mm is not None:
+        if not recompute:
+            raise ValueError("--window-radius-mm requires --recompute")
+        window_radius_m = window_radius_mm / 1000
+        if isinstance(window_radius_mm, bool) or not math.isfinite(window_radius_m) or window_radius_m <= 0:
+            raise ValueError("--window-radius-mm must be finite and positive")
+        if output is not None:
+            parent = Path(output).resolve().parent
+            if parent.is_relative_to(batch_dir) or parent.exists():
+                raise ValueError("--window-radius-mm requires a new output directory outside the input directory")
     cfg = load_evaluation(evaluation)
     if barrier_model is not None and not Path(barrier_model).is_file():
         raise ValueError(f"Barrier model does not exist: {barrier_model}")
@@ -561,19 +659,27 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
         present = {path for _, path in entries}
         entries.extend((row["start_id"], path) for path, row in planned_study.items() if path not in present)
         planned = True
-    rows = [summarize_run(start_id, directory, cfg, recompute=recompute) for start_id, directory in entries]
+    elif planned:
+        with Path(starts or batch_dir / "starts.csv").open(newline="", encoding="utf-8") as handle:
+            planned_study = {(batch_dir / row["run_dir"]).resolve(): row for row in csv.DictReader(handle)}
+    rows = [summarize_run(start_id, directory, cfg, recompute=recompute, window_radius_m=window_radius_m)
+            for start_id, directory in entries]
     batch_manifest = batch_dir / "batch.json"
     batch_settings, _ = read_object(batch_manifest, []) if planned and batch_manifest.is_file() else ({}, "missing")
     for row in rows:
-        plan = planned_study.get(Path(row["run_dir"]), batch_settings)
+        plan = {**batch_settings, **planned_study.get(Path(row["run_dir"]), {})}
         if plan and row["status"] == "missing":
-            for name in ("start_id", "robot", "model", "controller", "pulse"):
-                row[name] = plan.get(name, row[name])
+            for name in ("start_id", "robot", "model", "controller", "pulse", "pair_id", "member"):
+                if plan.get(name) not in (None, "", "NA"):
+                    row[name] = plan[name]
             row["notes"] = "Planned run has not been executed"
-    path = Path(output) if output is not None else batch_dir / "runs.csv"
+    if output is None:
+        path = (Path(mkdtemp(prefix="plane-metrics-")) if recompute else batch_dir) / "runs.csv"
+    else:
+        path = Path(output)
     if path.resolve().suffix != ".csv" or path.resolve().name in {"starts.csv", "study_runs.csv", "planned_starts.csv"}:
         raise ValueError("Derived run tables must be written to a .csv file")
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=window_radius_mm is None or output is None)
     reports = []
     for row in rows:
         report = {"start_id": row["start_id"], "status": "not_evaluated"}
@@ -584,6 +690,8 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
                 report = evaluate_run(row["run_dir"], barrier_model, row["start_id"])
             except (OSError, ValueError, KeyError, TypeError, RuntimeError, EOFError, BadZipFile) as exc:
                 report.update(status="unavailable", error=f"{type(exc).__name__}: {exc}")
+        if row.get("member"):
+            report.update(member=row["member"], pair_id=row.get("pair_id"))
         reports.append(report)
         if report["status"] == "evaluated":
             row["sampled_barrier_exit"] = report["paths"]["tcp"]["positive_samples_inside"] > 0
@@ -604,7 +712,7 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
     path.with_name("barrier.json").write_text(
         json.dumps({"runs": reports}, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
-    write_summary(path.with_name("summary.md"), rows, reports)
+    write_summary(path.with_name("summary.md"), rows, reports, window_radius_mm=window_radius_mm)
     return path, rows, planned
 
 
@@ -619,17 +727,22 @@ def main(argv=None):
     parser.add_argument(
         "--evaluation", type=Path, help="YAML with explicit goal/tracking thresholds"
     )
-    parser.add_argument("--output", type=Path, help="output CSV; default: batch_dir/runs.csv")
+    parser.add_argument(
+        "--output", type=Path,
+        help="output CSV; defaults to batch_dir/runs.csv or a new temporary directory with --recompute",
+    )
     parser.add_argument(
         "--barrier-model", type=Path,
         help="trusted local model_b.pth for separate ideal/TCP sampled checks; default: NA",
     )
     parser.add_argument("--recompute", action="store_true", help="calculate metrics from verified raw trajectories")
+    parser.add_argument("--window-radius-mm", type=float,
+                        help="ideal goal radius for the MSE window; requires --recompute and a new output directory")
     args = parser.parse_args(argv)
     try:
         path, rows, planned = aggregate(
             args.batch_dir, starts=args.starts, evaluation=args.evaluation, output=args.output,
-            barrier_model=args.barrier_model, recompute=args.recompute,
+            barrier_model=args.barrier_model, recompute=args.recompute, window_radius_mm=args.window_radius_mm,
         )
     except (OSError, ValueError, yaml.YAMLError) as exc:
         parser.exit(2, f"Aggregation error: {exc}\n")

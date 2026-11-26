@@ -18,7 +18,8 @@ from evaluation.metrics import evaluate_saved_run
 from evaluation.run_artifacts import sha256, write_json
 from sim.ds import ROOT, demo_files, input_path, model_catalog
 from sim.robot import MENAGERIE_DIR, ROBOTS
-from sim.sim import build_case
+from sim.sim import build_case, replay_config
+from sim.starts import StartUnavailable
 from sim.controllers import pic, servo
 
 
@@ -130,7 +131,7 @@ def git_state():
 
 
 def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
-               study=None, compute_tracking=True):
+               study=None, compute_tracking=True, start_row=None):
     """Build and simulate one experiment, then record raw and optional derived outputs."""
     output = Path(output)
     hashes = input_hashes(cfg) if hashes is None else hashes
@@ -147,6 +148,9 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
     torque_config = pic_config.get("torque_limit") if isinstance(pic_config, dict) else None
     if isinstance(torque_config, dict) and "source" in torque_config:
         ignored.append("pic.torque_limit.source")
+    if start_row is not None:
+        start_id = start_row["start_id"] if start_id is None else start_id
+        cfg = replay_config(cfg, start_row)
     start = cfg["task"].get("start")
     sampling_seed = ((cfg.get("multistart") or {}).get("seed", 0)
                      if isinstance(start, dict) and "index" in start else None)
@@ -161,7 +165,9 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
         "seeds": {"ik": cfg["sim"]["seed"], "start_sampling": sampling_seed},
         "disturbance": cfg["disturbance"],
         "ignored_config_keys": ignored,
-        "evaluation_schema": 1,
+        "evaluation_schema": 2,
+        "task_orientation": cfg["task"].get("orientation", "none"),
+        "sigma_rotation_length_m": cfg["sim"].get("sigma_rotation_length_m", 1.0),
         "git": git_state(),
         "command_line": list(sys.argv if command_line is None else command_line),
         "python": platform.python_version(),
@@ -195,8 +201,28 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
     manifest["artifact_sha256"] = {config_path.name: sha256(config_path)}
     started = time.perf_counter()
     stage = "start_ik"
+    case = None
+
+    def save_start(row):
+        manifest["start_id"] = row["start_id"]
+        manifest["seeds"]["ik"] = row["ik_seed"]
+        row.setdefault("start_seed", sampling_seed)
+        manifest["seeds"]["start_sampling"] = row["start_seed"]
+        for key in ("member", "pair_id"):
+            if row.get(key):
+                manifest[key] = row[key]
+        manifest["initialization_status"] = row["status"]
+        manifest["sigma_min_start"] = row.get("sigma_min_start")
+        write_json(output / "starts.json", [row])
+        manifest["artifact_sha256"]["starts.json"] = sha256(output / "starts.json")
+
     try:
-        case = build_case(cfg)
+        if start_row is None and cfg["sim"].get("start_criterion") != "closest_to_reference":
+            case = build_case(cfg)
+        else:
+            case = build_case(cfg, start_id=start_id, start_row=start_row)
+            row = case.starts.record(case.q_start) if start_row is None else dict(start_row)
+            save_start(row)
         manifest.update(
             robot_model={
                 "mjcf": str(Path("vendor") / case.robot.spec.mjcf),
@@ -240,14 +266,11 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
         stage = "simulation"
         result = (pic.run(case, compute_tracking=False)
                   if controller is pic and not compute_tracking else controller.run(case))
+        stage = "artifacts"
         trajectory = result["traj"]
         np.savez_compressed(output / "traj.npz", **trajectory)
         manifest["artifact_sha256"]["traj.npz"] = sha256(output / "traj.npz")
-        manifest["initial_state"] = {
-            name: trajectory[channel][0].tolist()
-            for name, channel in (("q_rad", "Q"), ("qd_rad_s", "QD"), ("tcp_m", "P"))
-            if channel in trajectory and len(trajectory[channel])
-        }
+        manifest["initial_state"] = case.initial_state
         write_json(output / "controller.json", {k: v for k, v in result.items() if k != "traj"})
         manifest["artifact_sha256"]["controller.json"] = sha256(output / "controller.json")
         stage = "evaluation"
@@ -257,13 +280,26 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
             manifest["artifact_sha256"]["metrics.json"] = sha256(output / "metrics.json")
         manifest.update(status="complete", wall_time_s=time.perf_counter() - started)
         write_json(output / "manifest.json", manifest)
+    except StartUnavailable as exc:
+        save_start(dict(exc.row))
+        manifest.update(status=exc.row["status"], failure_stage="start_ik",
+                        wall_time_s=time.perf_counter() - started)
+        write_json(output / "manifest.json", manifest)
+        print(f"{exc.row['start_id']}: {exc}", file=sys.stderr)
+        return 1
     except BaseException as exc:
+        if case is not None and case.initial_state is not None:
+            manifest["initial_state"] = case.initial_state
+        elif stage == "simulation":
+            stage = "controller_initialization"
         manifest.update(
             status="incomplete" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "error",
             error=f"{type(exc).__name__}: {exc}",
             failure_stage=stage,
             wall_time_s=time.perf_counter() - started,
         )
+        if stage == "start_ik":
+            manifest.setdefault("initialization_status", "error")
         write_json(output / "manifest.json", manifest)
         (output / "error.txt").write_text(traceback.format_exc())
         if isinstance(exc, (KeyboardInterrupt, SystemExit)):
@@ -274,8 +310,9 @@ def run_single(cfg, output, *, hashes=None, command_line=None, start_id=None,
     if not compute_tracking:
         return 0
     print(f"Status: complete; success: {metrics.get('success', 'NA')}")
-    for key, label in (("final_distance_m", "Final distance [m]"), ("mse_sync_m2", "MSE [m^2]"),
-                       ("dtw_mean_m", "DTW [m]")):
+    for key, label in (("final_distance_m", "Final distance [m]"),
+                       ("mse_sync_plane_m2", "Windowed task-space MSE [m^2]"),
+                       ("dtw_mean_plane_m", "Task-space DTW [m]")):
         value = metrics.get(key)
         print(f"{label}: {value:.9g}" if value is not None else f"{label}: NA")
     return 0

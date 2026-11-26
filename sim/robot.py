@@ -117,10 +117,16 @@ def _quat_z_to(a: np.ndarray) -> np.ndarray:
 class Robot:
     """MuJoCo FK and world-frame Jacobians evaluated on a separate kinematic data object."""
 
-    def __init__(self, spec: RobotSpec, tcp_offset=None, tool_radius: float = 0.0, obstacles=None):
+    def __init__(self, spec: RobotSpec, tcp_offset=None, tool_radius: float = 0.0, obstacles=None,
+                 *, fixed_joints_rad=None):
         self.spec = spec
         path = os.path.join(MENAGERIE_DIR, spec.mjcf)
-        if tool_radius > 0 or obstacles:
+        self.lock_frames = {}
+        if fixed_joints_rad is not None:
+            if tool_radius > 0 or obstacles:
+                raise ValueError("Custom lock angles require the registered arm geometry")
+            self.model = self._fixed_model(path, fixed_joints_rad)
+        elif tool_radius > 0 or obstacles:
             self.model = self._build(path, spec, tcp_offset, tool_radius, obstacles or [])
         else:
             self.model = mujoco.MjModel.from_xml_path(path)
@@ -134,6 +140,8 @@ class Robot:
         self.qadr = np.array([self.model.jnt_qposadr[j] for j in jids])
         self.dadr = np.array([self.model.jnt_dofadr[j] for j in jids])
         self.n = len(jids)
+        self.periodic = (~self.model.jnt_limited[jids].astype(bool)
+                         & (self.model.jnt_type[jids] == mujoco.mjtJoint.mjJNT_HINGE))
         rng = np.array([self.model.jnt_range[j] for j in jids])
         self.q_min, self.q_max = (rng[:, 0].copy(), rng[:, 1].copy())
         self.qd_max = np.asarray(spec.qd_max, float)
@@ -159,6 +167,74 @@ class Robot:
         self.q_home = self.model.key_qpos[key][self.qadr].copy() if key >= 0 else np.zeros(self.n)
         self._jp = np.zeros((3, self.model.nv))
         self._jr = np.zeros((3, self.model.nv))
+
+    def reference_posture(self):
+        """Read the named home keyframe in the arm's declared joint order."""
+        key = self.model.key("home")
+        names = tuple(self.model.joint(j).name for j in np.argsort(self.model.jnt_qposadr))
+        if names != self.spec.joints:
+            raise ValueError(f"Unexpected joint layout for {self.spec.name}: {names}")
+        q = key.qpos[self.qadr].copy()
+        if not self.valid_angles(q):
+            raise ValueError(f"Invalid home keyframe in {self.spec.mjcf}")
+        return q
+
+    def valid_angles(self, q):
+        return (q.shape == (self.n,) and np.isfinite(q).all()
+                and np.all(self.periodic | ((q >= self.q_min) & (q <= self.q_max))))
+
+    def full_angles(self, q):
+        order = FR3.joints if self.spec.family == "FR3" else self.spec.joints
+        angles = {**dict(zip(self.spec.joints, q)), **dict(self.spec.fixed_joints)}
+        return [float(angles[j]) for j in order]
+
+    def distance_squared(self, q, ref):
+        delta = q - ref
+        delta[self.periodic] = (delta[self.periodic] + np.pi) % (2 * np.pi) - np.pi
+        return float(delta @ delta)
+
+    def _fixed_model(self, path, angles):
+        """Place the reduced MJCF's rigid bodies at the prescribed full-arm angles."""
+        if not angles or set(angles) != dict(self.spec.fixed_joints).keys():
+            raise ValueError("task.fixed_joints_rad must name the removed joints of the FR3 variant")
+        full = Robot(FR3)
+        q = full.reference_posture()
+        for joint, angle in angles.items():
+            i = FR3.joints.index(joint)
+            if isinstance(angle, bool) or not full.q_min[i] <= angle <= full.q_max[i]:
+                raise ValueError(f"Lock angle outside model limits: {joint}={angle}")
+            q[i] = angle
+        full.set_q(q)
+        reduced = mujoco.MjSpec.from_file(path)
+        for joint in angles:
+            j = full.model.joint(joint).id
+            b = full.model.jnt_bodyid[j]
+            parent = full.model.body_parentid[b]
+            parent_R = full.data.xmat[parent].reshape(3, 3)
+            body = reduced.body(full.model.body(b).name)
+            body.pos = parent_R.T @ (full.data.xpos[b] - full.data.xpos[parent])
+            body_R = parent_R.T @ full.data.xmat[b].reshape(3, 3)
+            body.quat = Rotation.from_matrix(body_R).as_quat(scalar_first=True)
+            rest = Rotation.from_quat(full.model.body_quat[b], scalar_first=True)
+            self.lock_frames[joint] = (body.name, rest, full.model.jnt_axis[j].copy(),
+                                       full.model.qpos0[full.model.jnt_qposadr[j]])
+        self.spec = replace(self.spec, fixed_joints=tuple(angles.items()))
+        return reduced.compile()
+
+    def effective_locks(self, q):
+        """Measure configured rigid joint angles from initialized body frames."""
+        angles = dict(self.spec.fixed_joints)
+        self.set_q(q)
+        for joint, (name, rest, axis, zero) in self.lock_frames.items():
+            b = self.model.body(name).id
+            parent = self.model.body_parentid[b]
+            relative = self.data.xmat[parent].reshape(3, 3).T @ self.data.xmat[b].reshape(3, 3)
+            principal = (rest.inv() * Rotation.from_matrix(relative)).as_rotvec() @ axis + zero
+            angle = principal + 2 * np.pi * round((angles[joint] - principal) / (2 * np.pi))
+            if not np.isclose(angles[joint], angle, rtol=0, atol=1e-10):
+                raise ValueError(f"Initialized {joint} angle {angle} differs from {angles[joint]}")
+            angles[joint] = float(angle)
+        return angles
 
     def set_q(self, q: np.ndarray) -> None:
         self.data.qpos[self.qadr] = q
@@ -236,8 +312,9 @@ class Robot:
         return out
 
     def limit_margin_pct(self, q: np.ndarray) -> np.ndarray:
-        rng = self.q_max - self.q_min
-        return 100.0 * np.minimum(q - self.q_min, self.q_max - q) / rng
+        margin = 100.0 * np.minimum(q - self.q_min, self.q_max - q)
+        return np.divide(margin, self.q_max - self.q_min, where=~self.periodic,
+                         out=np.full(self.n, np.inf))
 
 
 def svd_pinv(J: np.ndarray, rcond: float = 1e-10) -> np.ndarray:
@@ -290,6 +367,10 @@ class Target:
     a_des: np.ndarray | None = None
     axis_local: tuple = (0.0, 0.0, 1.0)
 
+    def tilt(self, R):
+        """World-frame tilt error and the two angular directions it controls."""
+        return axis_error(R, self.a_des, self.axis_local), perp_basis(R @ self.axis_local)
+
 
 def task_rows(J6: np.ndarray, R: np.ndarray, tgt: Target, v_lin: np.ndarray, k_rot: float):
     if tgt.mode == "pos":
@@ -298,11 +379,45 @@ def task_rows(J6: np.ndarray, R: np.ndarray, tgt: Target, v_lin: np.ndarray, k_r
         e = rot_error(R, tgt.R_des)
         return (J6, np.concatenate([v_lin, k_rot * e]), float(np.linalg.norm(e)))
     if tgt.mode == "axis5":
-        e = axis_error(R, tgt.a_des, tgt.axis_local)
-        B = perp_basis(R @ np.asarray(tgt.axis_local, float))
+        e, B = tgt.tilt(R)
         Jt = np.vstack([J6[:3], B.T @ J6[3:]])
         return (Jt, np.concatenate([v_lin, k_rot * (B.T @ e)]), float(np.linalg.norm(e)))
     raise ValueError(tgt.mode)
+
+
+def orientation_target(task, emb):
+    mode = task.get("orientation", "none")
+    if mode == "axis5":
+        def unit_vector(value, name):
+            vector = np.asarray(value, float)
+            if vector.shape != (3,) or not np.isclose(np.linalg.norm(vector), 1.0, rtol=0, atol=1e-9):
+                raise ValueError(f"task.{name} must be a finite unit 3-vector")
+            return vector / np.linalg.norm(vector)
+
+        direction = task.get("tool_direction_world", "inward_plane_normal")
+        if isinstance(direction, str):
+            if direction != "inward_plane_normal" or emb.E.shape[1] != 2:
+                raise ValueError("inward_plane_normal requires a planar embedding")
+            direction = -emb.normal
+        return Target(mode, a_des=unit_vector(direction, "tool_direction_world"),
+                      axis_local=unit_vector(task["tool_axis_local"], "tool_axis_local"))
+    if mode == "hold":
+        return Target("full6", R_des=np.asarray(task.get("R_des", R_DES_DEFAULT), float))
+    if mode not in ORIENTATION_MODES:
+        raise ValueError(f"Unknown task.orientation: {mode!r}")
+    return Target("pos")
+
+
+def scaled_sigma_min(rows, rotation_length_m=1.0):
+    """Smallest required task singular value, with angular rows in m/rad."""
+    if rows.shape[1] < rows.shape[0]:
+        return 0.0
+    if len(rows) > 3:
+        rows = rows.copy()
+        rows[3:] *= rotation_length_m
+    values = np.linalg.svd(rows, compute_uv=False)
+    cutoff = values[0] * max(rows.shape) * np.finfo(float).eps
+    return float(values[-1]) if values[-1] > cutoff else 0.0
 
 
 @dataclass
@@ -370,7 +485,9 @@ def ik_pose(
     lam: float = 0.001,
     max_step: float = 0.2,
 ):
-    q = np.clip(np.array(q_init, float), robot.q_min, robot.q_max)
+    lo = np.where(robot.periodic, -np.inf, robot.q_min)
+    hi = np.where(robot.periodic, np.inf, robot.q_max)
+    q = np.clip(np.array(q_init, float), lo, hi)
     free = np.ones(robot.n, bool) if free is None else free
     idx = np.flatnonzero(free)
     for _ in range(iters):
@@ -385,7 +502,7 @@ def ik_pose(
         nrm = np.linalg.norm(dq)
         if nrm > max_step:
             dq *= max_step / nrm
-        q[idx] = np.clip(q[idx] + dq, robot.q_min[idx], robot.q_max[idx])
+        q[idx] = np.clip(q[idx] + dq, lo[idx], hi[idx])
     pc, R = robot.fk(q)
     _, _, ori = task_rows(robot.jac(), R, tgt, p_des - pc, 1.0)
     pe = float(np.linalg.norm(p_des - pc))
@@ -395,7 +512,15 @@ def ik_pose(
 def task_sigma_min(robot, q, tgt: Target, free) -> float:
     _, R = robot.fk(q)
     Jt, _, _ = task_rows(robot.jac(), R, tgt, np.zeros(3), 1.0)
-    return float(np.linalg.svd(Jt[:, free], compute_uv=False)[-1])
+    return scaled_sigma_min(Jt[:, free])
+
+
+def _legacy_sigma_score(robot, q, tgt, free):
+    # Prior max_sigma_margin experiments used the shortest returned singular value
+    # even for a task with fewer movable axes than required rows.
+    _, R = robot.fk(q)
+    rows, _, _ = task_rows(robot.jac(), R, tgt, np.zeros(3), 1.0)
+    return float(np.linalg.svd(rows[:, free], compute_uv=False)[-1])
 
 
 def multistart_ik(
@@ -409,20 +534,30 @@ def multistart_ik(
     free=None,
     tol_conv: float = 1e-06,
     min_margin_pct: float = 5.0,
+    *,
+    ori_tol=None,
+    valid_candidate=None,
 ) -> IKResult:
     rng = np.random.default_rng(seed)
     q_ref = np.asarray(q_ref, float)
     free = np.ones(robot.n, bool) if free is None else np.asarray(free, bool)
-    starts = [q_ref] + list(rng.uniform(robot.q_min, robot.q_max, size=(n_starts - 1, robot.n)))
+    lo = np.where(robot.periodic, q_ref - np.pi, robot.q_min)
+    hi = np.where(robot.periodic, q_ref + np.pi, robot.q_max)
+    starts = [q_ref] + list(rng.uniform(lo, hi, size=(n_starts - 1, robot.n)))
     starts = [np.where(free, s, q_ref) for s in starts]
     sols = []
+    ori_tol = tol_conv if ori_tol is None else ori_tol
+    solver_tol = min(1e-9, tol_conv, ori_tol) if criterion == "closest_to_reference" else 1e-9
     for s in starts:
-        q, pe, oe = ik_pose(robot, p_des, tgt, s, free=free)
+        q, pe, oe = ik_pose(robot, p_des, tgt, s, free=free, tol=solver_tol)
         sols.append((q, pe, oe))
-    conv = [s for s in sols if s[1] < tol_conv and s[2] < tol_conv]
+    conv = [s for s in sols if s[1] < tol_conv and s[2] < ori_tol
+            and (valid_candidate is None or valid_candidate(s[0]))]
     margin_ok = True
     if conv:
-        if criterion == "nearest_ref":
+        if criterion == "closest_to_reference":
+            best = min(conv, key=lambda s: robot.distance_squared(s[0], q_ref))
+        elif criterion == "nearest_ref":
             best = min(conv, key=lambda s: np.linalg.norm(s[0] - q_ref))
         elif criterion == "max_margin":
             best = max(conv, key=lambda s: robot.limit_margin_pct(s[0]).min())
@@ -431,7 +566,7 @@ def multistart_ik(
             margin_ok = bool(ok)
             # Margin is preferred, not required; retain converged solutions as fallback.
             pool = ok if ok else conv
-            best = max(pool, key=lambda s: task_sigma_min(robot, s[0], tgt, free))
+            best = max(pool, key=lambda s: _legacy_sigma_score(robot, s[0], tgt, free))
         else:
             raise ValueError(criterion)
     else:
@@ -674,7 +809,7 @@ def servo_task_rows(J6, R, tgt, v, k_rot, emb, mode="xyz"):
 
 R_DES_DEFAULT = [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]]
 ORIENT_DEFAULTS = {"K_r": 50.0, "zeta": 1.414}
-ORIENTATION_MODES = ("none", "damped", "hold")
+ORIENTATION_MODES = ("none", "damped", "hold", "axis5")
 
 
 @dataclass
@@ -689,11 +824,17 @@ class OrientParams:
     """
 
     mode: str
-    R_des: np.ndarray
+    R_des: np.ndarray | None
     K_r: float
-    zeta: float
+    zeta: float | None
     D_r: np.ndarray
-    Lambda_r: np.ndarray
+    Lambda_r: np.ndarray | None
+
+    def torque(self, omega, error, basis=None):
+        if basis is not None:
+            return self.K_r * error - self.D_r @ (basis @ (basis.T @ omega))
+        torque = -self.D_r @ omega
+        return torque + self.K_r * error if self.mode == "hold" else torque
 
 
 def rotational_inertia(robot, q) -> np.ndarray:
@@ -717,6 +858,11 @@ def orientation_params(robot, q, task_cfg: dict) -> OrientParams | None:
         return None
     g = {**ORIENT_DEFAULTS, **(task_cfg.get("orientation_gains") or {})}
     K_r, zeta = (float(g["K_r"]), float(g["zeta"]))
+    if mode == "axis5":
+        damping = float(g.get("D_tilt", 5.0))
+        if not (np.isfinite(K_r) and K_r > 0 and np.isfinite(damping) and damping >= 0):
+            raise ValueError("axis5 needs positive K_r and finite nonnegative D_tilt")
+        return OrientParams(mode, None, K_r, None, damping * np.eye(3), None)
     if not (K_r > 0 and zeta > 0):
         raise ValueError("orientation gains K_r and zeta must be > 0")
     Lam = rotational_inertia(robot, q)
