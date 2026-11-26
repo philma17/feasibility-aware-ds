@@ -16,7 +16,7 @@ import yaml
 
 from sim.robot import ROBOTS
 from evaluation.metrics import evaluate_saved_run
-from evaluation.run_artifacts import read_config, sha256
+from evaluation.run_artifacts import read_config, sha256, write_csv
 
 TRACKING_METRICS = (
     # Historical full-world, full-duration measurements retain their own names.
@@ -174,8 +174,7 @@ def run_entries(batch_dir, starts):
                 start_id, directory = item.get("start_id", ""), item.get("run_dir", "")
                 if not start_id or not start_id.strip() or not directory or not directory.strip():
                     raise ValueError(f"Empty start_id or run_dir in start CSV line {number}")
-                path = Path(directory)
-                path = (path if path.is_absolute() else batch_dir / path).resolve()
+                path = (batch_dir / directory).resolve()
                 identity = (start_id, item.get("member"))
                 if identity in ids or path in paths:
                     raise ValueError(f"Duplicate start_id or run_dir in start CSV line {number}")
@@ -695,20 +694,7 @@ def aggregate(batch_dir, *, starts=None, evaluation=None, output=None, barrier_m
         reports.append(report)
         if report["status"] == "evaluated":
             row["sampled_barrier_exit"] = report["paths"]["tcp"]["positive_samples_inside"] > 0
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    key: (
-                        "NA"
-                        if value is None
-                        else (str(value).lower() if isinstance(value, bool) else value)
-                    )
-                    for key, value in row.items()
-                }
-            )
+    write_csv(path, FIELDS, rows)
     path.with_name("barrier.json").write_text(
         json.dumps({"runs": reports}, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )

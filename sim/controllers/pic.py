@@ -234,14 +234,7 @@ def _run_source(
     joint_friction_feedforward=None,
     compute_tracking: bool = True,
 ) -> dict:
-    """Closed-loop PIC-DS run. use_f=False sets f = 0 (damping + gravity compensation only).
-    pulses: iterable of dicts {t_start_s, duration_s, force_N[3]} (world frame, at the TCP).
-    gravity_comp: "nominal" (g(q) of the unmodified model, the default: the controller does not know
-    about plant changes) or "plant" (g(q) of the simulated, possibly modified model; separates the effect
-    of a changed plant from the effect of the compensation mismatch).
-    Orientation (case.orient): none -> tau = g + Jp^T F + tau_null (bit-identical to the historical code);
-    damped/hold -> tau = g + J6^T [F; tau_rot] + tau_null with the null space of J6 (FR3: 1-dim, UR5e: 0).
-    """
+    """Run PIC with TCP force pulses and gravity compensation from the selected model."""
     robot, ds, emb, sp = (case.robot, case.ds, case.emb, case.sp)
     m = robot.model
     n = robot.n

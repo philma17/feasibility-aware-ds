@@ -92,8 +92,6 @@ def main(argv=None):
     output = args.output or ROOT / "results" / f"{stamp}_{cfg['controller']}_{uuid4().hex[:8]}"
     command_line = list(sys.argv if argv is None else argv)
     if args.runs is not None:
-        from evaluation.aggregate import aggregate
-
         try:
             return run_batch(
                 cfg,
@@ -102,7 +100,6 @@ def main(argv=None):
                 experiment.run_single,
                 hashes=hashes,
                 command_line=command_line,
-                aggregate_runs=aggregate,
                 saved_rows=rows, hash_inputs=input_hashes,
             )
         except (ValueError, KeyError, TypeError, FileNotFoundError, NotImplementedError) as exc:

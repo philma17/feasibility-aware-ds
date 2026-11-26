@@ -1,6 +1,7 @@
 """Read and write the files that describe a saved simulation run."""
 
 from dataclasses import asdict, is_dataclass
+import csv
 import hashlib
 import json
 from pathlib import Path
@@ -30,6 +31,18 @@ def sha256(path):
 
 def write_json(path, value):
     path.write_text(json.dumps(jsonable(value), indent=2, allow_nan=False) + "\n", encoding="utf-8")
+
+
+def write_csv(path, fields, rows):
+    def cell(value):
+        if value is None:
+            return "NA"
+        return json.dumps(value) if isinstance(value, (list, bool)) else value
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows({key: cell(value) for key, value in row.items()} for row in rows)
 
 
 def read_config(directory, manifest):

@@ -814,14 +814,7 @@ ORIENTATION_MODES = ("none", "damped", "hold", "axis5")
 
 @dataclass
 class OrientParams:
-    """Rotational part of the PIC-DS torque (mode 'damped' | 'hold').
-    tau_rot = -D_r omega                       (damped)
-    tau_rot =  K_r e_rot - D_r omega           (hold),  e_rot = rot_error(R, R_des) [rad, world]
-    K_r = ORIENT_DEFAULTS (recording), D_r = 2 zeta sqrt(K_r) sqrtm(Lambda_r(q_start)) (constant 3x3):
-    Lambda_r = (Jr M^-1 Jr^T)^-1 is the rotational task-space inertia at the start configuration, so each
-    principal rotational axis gets damping ratio zeta (1.414 = the value of the recording) for that
-    inertia. ASSUMPTION: the recording's rotational_stiffness is isotropic [Nm/rad] in the world frame.
-    """
+    """PIC angular gains in world coordinates, with isotropic stiffness in Nm/rad."""
 
     mode: str
     R_des: np.ndarray | None
@@ -867,6 +860,7 @@ def orientation_params(robot, q, task_cfg: dict) -> OrientParams | None:
         raise ValueError("orientation gains K_r and zeta must be > 0")
     Lam = rotational_inertia(robot, q)
     w, V = np.linalg.eigh(0.5 * (Lam + Lam.T))
+    # Fixed damping from the square root of the rotational inertia at q.
     D = 2.0 * zeta * np.sqrt(K_r) * (V * np.sqrt(w)) @ V.T
     R_des = np.asarray(task_cfg.get("R_des", R_DES_DEFAULT), float)
     if not (np.allclose(R_des @ R_des.T, np.eye(3), atol=1e-09) and np.linalg.det(R_des) > 0):

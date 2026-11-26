@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import csv
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -16,7 +15,8 @@ import traceback
 import numpy as np
 import yaml
 
-from evaluation.run_artifacts import write_json
+from evaluation.aggregate import aggregate
+from evaluation.run_artifacts import write_csv, write_json
 from sim.ds import MULTISTART_DEFAULT, load_scenario, sample_starts
 from sim.pairs import comparison_configs, pairing_settings, plan_pair
 
@@ -111,23 +111,6 @@ def plan_starts(cfg, count):
     ]
 
 
-def write_starts(path, rows):
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=START_FIELDS)
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    key: (
-                        "NA"
-                        if value is None
-                        else (json.dumps(value) if isinstance(value, list) else value)
-                    )
-                    for key, value in row.items()
-                }
-            )
-
-
 def refresh_start(output, row):
     path = output / row["run_dir"] / "manifest.json"
     if not path.is_file():
@@ -158,13 +141,8 @@ def record_setup_error(output, row, cfg, exc):
     (directory / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
 
 
-def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate_runs=None,
-              saved_rows=None, hash_inputs=None):
+def run_batch(cfg, output, count, run_single, *, hashes, command_line, saved_rows=None, hash_inputs=None):
     """Keep failed and unattempted starts in the same plan and final table."""
-    if aggregate_runs is None:
-        from evaluation.aggregate import aggregate
-
-        aggregate_runs = aggregate
     comparison = lock = sigma_gap = None
     configs = {None: cfg}
     pairing = cfg.get("pairing")
@@ -200,7 +178,7 @@ def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate
     output.mkdir(parents=True, exist_ok=False)
     starts = output / "starts.csv"
     # Persist the full plan first so interrupted batches retain unattempted starts.
-    write_starts(starts, rows)
+    write_csv(starts, START_FIELDS, rows)
     (output / "batch_config.yaml").write_text(
         yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8"
     )
@@ -252,7 +230,7 @@ def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate
                     record_setup_error(output, row, cfg, exc)
                     code = 1
                 refresh_start(output, row)
-                write_starts(starts, rows)
+                write_csv(starts, START_FIELDS, rows)
                 if code != 0 or row["status"] != "complete":
                     exit_code = 1
         completed = True
@@ -260,8 +238,8 @@ def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate
         # Also runs after Ctrl-C: untouched plan entries become explicit missing rows.
         for row in rows:
             refresh_start(output, row)
-        write_starts(starts, rows)
-        csv_path, table, _ = aggregate_runs(output)
+        write_csv(starts, START_FIELDS, rows)
+        csv_path, table, _ = aggregate(output)
         report.update(
             status="complete" if completed else "incomplete",
             complete_runs=sum(row["status"] == "complete" for row in table),
