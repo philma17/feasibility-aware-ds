@@ -1,5 +1,6 @@
 # LASA/Worm, XYZ plus pen direction. The attachment site is the virtual tip.
 model_source: pth
+pairing: null  # Optional batch design. See README.md.
 time_rate: demo  # Restore demonstration timing with vs / ps.
 robot: FR3
 sim:

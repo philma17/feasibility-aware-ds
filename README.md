@@ -103,9 +103,9 @@ An unreachable target keeps its ID and gets no trajectory or goal failure.
 python -B main.py configs/worm_axis5_pic.yaml --output results/nominal
 python -B main.py configs/worm_axis5_pic.yaml --runs 2 --output results/nominal-batch
 python -B main.py configs/worm_axis5_pic.yaml --start-list results/nominal-batch/starts.json --start-id start_001 --output results/replay
-python -B main.py configs/worm_axis5_pic.yaml --runs 2 --pair posture --sigma-gap 0.0001 --output results/postures
-python -B main.py configs/worm_axis5_pic.yaml --runs 2 --pair lock --lock fr3_joint5 0.2 --output results/locks
-python -B main.py configs/worm_axis5_pic.yaml --runs 2 --pair robot --output results/robots
+python -B main.py configs/worm_axis5_pic.yaml --runs 2 --set 'pairing={mode: posture, min_sigma_gap: 0.0001}' --output results/postures
+python -B main.py configs/worm_axis5_pic.yaml --runs 2 --set 'pairing={mode: lock, fixed_joints_rad: {fr3_joint5: 0.2}}' --output results/locks
+python -B main.py configs/worm_axis5_pic.yaml --runs 2 --set 'pairing={mode: robot}' --output results/robots
 ```
 
 Use a fresh output directory. For a four-step smoke run append
@@ -121,10 +121,14 @@ Run the start and replay regression tests with
 
 ## Paired comparisons
 
+Set the top-level `pairing` block for a fresh batch. Omit it or set it to
+`null` for ordinary runs. The resolved batch YAML records the block. Each
+member's resolved YAML can be used directly for replay.
+
 - **Posture.** Both rollouts use one target, placement, task, velocity and
   rollout config. The second posture minimizes the task's smallest singular
   value among distinct valid candidates. Its absolute drop must meet
-  `--sigma-gap` (default 0.001). Both measured values are recorded. If the
+  `pairing.min_sigma_gap` (default 0.001). Both measured values are recorded. If the
   search yields only a nominal member, it can run and the missing partner
   is recorded explicitly. For PIC hold/damped pairs the nominal posture
   supplies the inertia-derived damping gain for both members. A relative

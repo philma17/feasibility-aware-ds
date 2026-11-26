@@ -3,6 +3,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
 from unittest.mock import patch
 
 import numpy as np
@@ -18,6 +19,20 @@ from sim.starts import NO_IK, NO_PAIR, StartUnavailable
 
 
 class StartTests(unittest.TestCase):
+    def test_pairing_is_selected_by_yaml(self):
+        args = ["configs/worm_axis5_pic.yaml", "--set", "sim.n_starts=1", "--set", "sim.T_max=0.002",
+                "--set", "pairing={mode: lock, fixed_joints_rad: {fr3_joint5: 0.2}}"]
+        with TemporaryDirectory() as tmp:
+            batch = Path(tmp) / "batch"
+            self.assertEqual(main([*args, "--output", str(batch)]), 2)
+            self.assertFalse(batch.exists())
+            self.assertEqual(main([*args, "--runs", "1", "--output", str(batch)]), 0)
+            rows = json.loads((batch / "starts.json").read_text())
+            free, locked = rows
+            self.assertEqual((free["member"], locked["member"]), ("free", "locked"))
+            self.assertEqual(free["q_start_full_rad"], locked["q_start_full_rad"])
+            self.assertEqual(free["q_start_full_rad"][4], 0.2)
+
     def test_batch_and_single_cli_replay_identical_trajectory(self):
         args = ["configs/worm_axis5_pic.yaml", "--set", "sim.n_starts=1", "--set", "sim.T_max=0.002"]
         with TemporaryDirectory() as tmp:

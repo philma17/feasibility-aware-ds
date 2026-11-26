@@ -49,21 +49,12 @@ def main(argv=None):
     parser.add_argument("--start-list", type=Path, help="replay validated rows from starts.json")
     parser.add_argument("--start-id", help="select a saved start, e.g. start_000")
     parser.add_argument("--member", help="select one member of a saved pair")
-    parser.add_argument("--pair", choices=("posture", "lock", "robot"), help="paired batch design")
-    parser.add_argument("--sigma-gap", type=float, help="required absolute posture-pair sigma difference")
-    parser.add_argument("--lock", nargs=2, metavar=("JOINT", "RAD"), help="prescribed FR3 lock angle")
     parser.add_argument(
         "--list-models",
         action="store_true",
         help="list supported packages and local input availability",
     )
     args = parser.parse_args(argv)
-    if args.pair and (args.runs is None or args.start_list):
-        parser.error("--pair requires --runs and generates a new start list")
-    if bool(args.lock) != (args.pair == "lock"):
-        parser.error("--pair lock requires --lock JOINT RAD")
-    if args.sigma_gap is not None and args.pair != "posture":
-        parser.error("--sigma-gap requires --pair posture")
     if (args.start_id or args.member) and not args.start_list:
         parser.error("--start-id and --member select rows from --start-list")
     if args.runs is not None:
@@ -78,6 +69,8 @@ def main(argv=None):
         parser.error("a configuration is required unless --list-models is used")
     try:
         cfg = load_config(args.config, args.set)
+        if cfg.get("pairing") is not None and (args.runs is None or args.start_list):
+            raise ValueError("pairing requires a fresh batch with --runs")
         hashes = input_hashes(cfg)
         rows = (read_starts(args.start_list, start_id=args.start_id, member=args.member)
                 if args.start_list else None)
@@ -110,8 +103,7 @@ def main(argv=None):
                 hashes=hashes,
                 command_line=command_line,
                 aggregate_runs=aggregate,
-                comparison=args.pair, lock=args.lock, saved_rows=rows, hash_inputs=input_hashes,
-                sigma_gap=0.001 if args.sigma_gap is None else args.sigma_gap,
+                saved_rows=rows, hash_inputs=input_hashes,
             )
         except (ValueError, KeyError, TypeError, FileNotFoundError, NotImplementedError) as exc:
             print(f"Batch configuration error: {exc}", file=sys.stderr)

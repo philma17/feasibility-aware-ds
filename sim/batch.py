@@ -18,7 +18,7 @@ import yaml
 
 from evaluation.run_artifacts import write_json
 from sim.ds import MULTISTART_DEFAULT, load_scenario, sample_starts
-from sim.pairs import comparison_configs, plan_pair
+from sim.pairs import comparison_configs, pairing_settings, plan_pair
 
 START_FIELDS = (
     "start_id",
@@ -63,6 +63,7 @@ def read_starts(path, *, start_id=None, member=None):
 def start_config(cfg, count, index):
     """Replace the nominal single start with indexed sampling and the existing start IK."""
     child = deepcopy(cfg)
+    child.pop("pairing", None)
     # This count controls sampled TCP targets; sim.n_starts controls IK candidates.
     child["multistart"] = {**MULTISTART_DEFAULT, **(cfg.get("multistart") or {}), "n_starts": count}
     child["task"]["start"] = {"index": index}
@@ -158,15 +159,20 @@ def record_setup_error(output, row, cfg, exc):
 
 
 def run_batch(cfg, output, count, run_single, *, hashes, command_line, aggregate_runs=None,
-              comparison=None, lock=None, sigma_gap=0.001, saved_rows=None, hash_inputs=None):
+              saved_rows=None, hash_inputs=None):
     """Keep failed and unattempted starts in the same plan and final table."""
     if aggregate_runs is None:
         from evaluation.aggregate import aggregate
 
         aggregate_runs = aggregate
-    configs = comparison_configs(cfg, comparison, lock) if comparison else {None: cfg}
-    if comparison == "posture" and not (np.isfinite(sigma_gap) and sigma_gap > 0):
-        raise ValueError("--sigma-gap must be finite and positive")
+    comparison = lock = sigma_gap = None
+    configs = {None: cfg}
+    pairing = cfg.get("pairing")
+    if pairing is not None:
+        if saved_rows is not None:
+            raise ValueError("pairing requires a fresh batch")
+        comparison, lock, sigma_gap = pairing_settings(pairing)
+        configs = comparison_configs(cfg, comparison, lock)
     if saved_rows is None:
         targets = plan_starts(cfg, count)
     else:

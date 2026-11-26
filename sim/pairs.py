@@ -6,6 +6,27 @@ from .sim import prepare_case
 from .starts import NO_IK, StartProblem, StartUnavailable
 
 
+def pairing_settings(pairing):
+    fields = {"posture": {"min_sigma_gap"}, "lock": {"fixed_joints_rad"}, "robot": set()}
+    mode = pairing.get("mode") if isinstance(pairing, dict) else None
+    if mode not in tuple(fields):
+        raise ValueError("pairing.mode must be posture, lock or robot")
+    unknown = pairing.keys() - fields[mode] - {"mode"}
+    if unknown:
+        raise ValueError(f"Unknown pairing fields for {mode}: {sorted(unknown)}")
+    if mode == "posture":
+        gap = pairing.get("min_sigma_gap", 0.001)
+        if type(gap) not in (int, float) or not (np.isfinite(gap) and gap > 0):
+            raise ValueError("pairing.min_sigma_gap must be finite and positive")
+        return mode, None, gap
+    locks = pairing.get("fixed_joints_rad")
+    if mode == "lock":
+        if not isinstance(locks, dict) or len(locks) != 1:
+            raise ValueError("pairing.fixed_joints_rad must specify one FR3 joint and angle")
+        return mode, next(iter(locks.items())), None
+    return mode, None, None
+
+
 def comparison_configs(cfg, comparison, lock=None):
     if cfg["sim"].get("start_criterion") != "closest_to_reference":
         raise ValueError("Paired starts require sim.start_criterion=closest_to_reference")
@@ -16,16 +37,15 @@ def comparison_configs(cfg, comparison, lock=None):
     if comparison == "robot":
         return {"FR3": cfg, "UR5e": {**cfg, "robot": "UR5e"}}
     if comparison != "lock" or lock is None or lock[0] not in FR3.joints:
-        raise ValueError("Lock comparison needs --lock JOINT ANGLE_RAD")
+        raise ValueError("pairing.fixed_joints_rad must name an FR3 joint")
     joint, angle = lock
     index = FR3.joints.index(joint)
-    angle_rad = float(angle)
-    if not FR3.q_min_doc[index] <= angle_rad <= FR3.q_max_doc[index]:
+    if type(angle) not in (int, float) or not FR3.q_min_doc[index] <= angle <= FR3.q_max_doc[index]:
         raise ValueError(f"Invalid prescribed lock angle {joint}={angle}")
     locked = {
         **cfg,
         "robot": f"FR3_fixed_J{index + 1}",
-        "task": {**cfg["task"], "fixed_joints_rad": {joint: angle_rad}},
+        "task": {**cfg["task"], "fixed_joints_rad": {joint: float(angle)}},
     }
     return {"free": cfg, "locked": locked}
 

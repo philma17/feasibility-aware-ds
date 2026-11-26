@@ -51,6 +51,7 @@ def load_config(path, overrides=()):
         "disturbance",
         "spatial",
         "multistart",
+        "pairing",
         "model_source",
         "time_rate",
         "ds_speed_factor",
