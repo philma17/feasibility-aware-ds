@@ -158,6 +158,7 @@
 
   <contact>
     <exclude body1="fr3_link0" body2="fr3_link1"/>
+    <pair geom1="fr3_link1_collision" geom2="fr3_link3_collision"/>
   </contact>
 
   <keyframe>
