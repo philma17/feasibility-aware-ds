@@ -6,19 +6,69 @@ from tempfile import TemporaryDirectory
 import json
 from unittest.mock import patch
 
+import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
 from experiment import load_config
 from main import main
 from sim.batch import start_config
+from sim.controllers import servo
 from sim.pairs import comparison_configs, plan_pair
-from sim.sim import build_case
-from sim.robot import Robot, UR5E, scaled_sigma_min, task_rows
+from sim.sim import build_case, prepare_case
+from sim.robot import IKParams, ROBOTS, Robot, UR5E, scaled_sigma_min, solve_qdot, task_rows
 from sim.starts import NO_IK, NO_PAIR, StartUnavailable
 
 
 class StartTests(unittest.TestCase):
+    def test_locking_the_base_preserves_home_self_contact_filter(self):
+        for name in ("FR3", "FR3_fixed_J1", "FR3_fixed_J1_J3", "FR3_fixed_J1_J5"):
+            with self.subTest(name=name):
+                robot = Robot(ROBOTS[name])
+                robot.data.qpos[robot.qadr] = robot.reference_posture()
+                mujoco.mj_forward(robot.model, robot.data)
+                self.assertEqual(robot.data.ncon, 0)
+
+    def test_real_self_contact_survives_a_wrist_lock(self):
+        q = np.array([2.702039, .171347, -1.193862, -1.277630, 1.003839, .440714, 2.898543])
+        for name, angles in (("FR3", None), ("FR3_fixed_J7", {"fr3_joint7": q[-1]})):
+            with self.subTest(name=name):
+                robot = Robot(ROBOTS[name], fixed_joints_rad=angles)
+                robot.data.qpos[robot.qadr] = q[:robot.n]
+                mujoco.mj_forward(robot.model, robot.data)
+                pairs = {tuple(sorted(robot.model.geom(g).name for g in contact.geom))
+                         for contact in robot.data.contact}
+                self.assertIn(("fr3_link5_collision", "fr3_link7_collision"), pairs)
+
+    def test_servo_centers_free_roll_in_rank_deficient_axis5(self):
+        cfg = load_config("configs/worm_axis5_pic.yaml", ["robot=FR3_fixed_J1_J3"])
+        case = prepare_case(cfg)
+        robot = case.robot
+        q = robot.q_home
+        _, R = robot.fk(q)
+        rows = task_rows(robot.jac(), R, case.tgt, np.zeros(3), 1.0)[0]
+        span = robot.q_max - robot.q_min
+        mid = robot.q_min + span / 2
+        qd, _ = solve_qdot(rows, np.zeros(5), np.ones(robot.n, bool), robot.qd_max,
+                           IKParams(k_null=1.0), q, mid, span)
+        spin = robot.spec.joints.index("fr3_joint7")
+        self.assertAlmostEqual(qd[spin], (mid[spin] - q[spin]) / (span[spin] / 2))
+        np.testing.assert_allclose(rows @ qd, 0, atol=1e-12)
+
+    def test_singular_angular_inertia_at_a_locked_start(self):
+        for name in ("FR3_fixed_J5", "FR3_fixed_J3_J5_J7"):
+            cfg = load_config("configs/worm_axis5_pic.yaml", [f"robot={name}", "sim.n_starts=1"])
+            robot = Robot(ROBOTS[name])
+            q = robot.reference_posture()
+            p, R = robot.fk(q)
+            cfg["task"].update(orientation="hold", center=p.tolist(), start={"x0": [0, 0]},
+                               R_des=R.tolist())
+            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "rotational inertia"):
+                build_case(cfg)
+            cfg["controller"] = "servo"
+            with self.subTest(name=name, controller="servo"):
+                np.testing.assert_array_equal(build_case(cfg).q_start, q)
+
     def test_pairing_is_selected_by_yaml(self):
         args = ["configs/worm_axis5_pic.yaml", "--set", "sim.n_starts=1", "--set", "sim.T_max=0.002",
                 "--set", "pairing={mode: lock, fixed_joints_rad: {fr3_joint5: 0.2}}"]
@@ -122,3 +172,26 @@ class StartTests(unittest.TestCase):
         a, b = ur.reference_posture(), ur.reference_posture()
         a[0], b[0] = -3.1, 3.1
         self.assertAlmostEqual(ur.distance_squared(a, b), 6.2**2)
+
+    def test_locked_servo_logs_joint_torque_after_native_clipping(self):
+        cfg = load_config("configs/worm_servo.yaml", ["robot=FR3_fixed_J1_J5", "sim.dt=0.1",
+                          "sim.T_max=0.1", "plant.servo_enforce_torque_limit=false"])
+        case = prepare_case(cfg)
+        case.q_start = case.robot.reference_posture()
+
+        def static_command(model, data, n, *, observe, command, after_step, **kwargs):
+            command(0, observe(0)).apply(data)
+            mujoco.mj_forward(model, data)
+            after_step(0)
+            observe(1)
+
+        with patch.object(servo, "execute_intervals", static_command), patch.object(
+            servo, "ideal_rollout", return_value=np.tile(case.x0_n, (2, 1))
+        ):
+            result = servo.run(case)
+        limit = np.array([87, 87, 87, 12, 12])  # J2, J3, J4, J6, J7.
+        command = result["traj"]["tau_cmd"][0]
+        saturated = np.abs(command) > limit
+        self.assertTrue(saturated.any())
+        np.testing.assert_allclose(result["traj"]["tau_applied"][0], np.clip(command, -limit, limit))
+        np.testing.assert_array_equal(result["force_sat_steps_per_joint"], saturated)

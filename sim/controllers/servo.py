@@ -137,7 +137,7 @@ def _run_source(
 
     def after_step(k):
         nonlocal first_contact
-        TAU_APP[k] = d.actuator_force[sv.act]
+        TAU_APP[k] = d.qfrc_actuator[robot.dadr]
         if contact_check:
             ncon[k] = d.ncon
             if d.ncon and first_contact is None:
@@ -165,6 +165,10 @@ def _run_source(
     pos_exc = np.maximum(robot.q_min - Q, Q - robot.q_max)
     vel_ratio = np.abs(QD) / robot.qd_max
     sat = sv.force_limited & ((TAU_CMD < sv.force_lo) | (TAU_CMD > sv.force_hi))
+    # MuJoCo also clamps the transmitted torque at each force-limited joint.
+    joints = m.actuator_trnid[sv.act, 0]
+    joint_lo, joint_hi = m.jnt_actfrcrange[joints].T
+    sat |= m.jnt_actfrclimited[joints].astype(bool) & ((TAU_CMD < joint_lo) | (TAU_CMD > joint_hi))
     warn = {
         mujoco.mjtWarning(i).name: int(d.warning[i].number)
         for i in range(len(d.warning))

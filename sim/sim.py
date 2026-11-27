@@ -179,7 +179,8 @@ def build_case(cfg, friction_scale=None, speed_factor=None, *, start_id=None, st
     if start_row is not None and "orientation_gain_q_rad" in start_row:
         gain_q = np.asarray(start_row["orientation_gain_q_rad"], float)
         case.starts.from_angles(gain_q)
-    case.orient = orientation_params(case.robot, gain_q, cfg["task"])
+    if cfg["controller"] == "pic":
+        case.orient = orientation_params(case.robot, gain_q, cfg["task"])
     return case
 
 

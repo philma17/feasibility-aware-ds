@@ -385,6 +385,13 @@ def task_rows(J6: np.ndarray, R: np.ndarray, tgt: Target, v_lin: np.ndarray, k_r
     raise ValueError(tgt.mode)
 
 
+def _desired_rotation(task):
+    R = np.asarray(task.get("R_des", R_DES_DEFAULT), float)
+    if R.shape != (3, 3) or not (np.allclose(R @ R.T, np.eye(3), atol=1e-9) and np.linalg.det(R) > 0):
+        raise ValueError("task.R_des must be a rotation matrix")
+    return R
+
+
 def orientation_target(task, emb):
     mode = task.get("orientation", "none")
     if mode == "axis5":
@@ -402,7 +409,7 @@ def orientation_target(task, emb):
         return Target(mode, a_des=unit_vector(direction, "tool_direction_world"),
                       axis_local=unit_vector(task["tool_axis_local"], "tool_axis_local"))
     if mode == "hold":
-        return Target("full6", R_des=np.asarray(task.get("R_des", R_DES_DEFAULT), float))
+        return Target("full6", R_des=_desired_rotation(task))
     if mode not in ORIENTATION_MODES:
         raise ValueError(f"Unknown task.orientation: {mode!r}")
     return Target("pos")
@@ -441,7 +448,7 @@ def solve_qdot(
     idx = np.flatnonzero(free)
     Jf = J_task[:, idx]
     qd_f, smin, lam2 = dls(Jf, v_task, p.eps, p.lam_max)
-    if p.k_null > 0 and len(idx) > Jf.shape[0] and (q is not None):
+    if p.k_null > 0 and q is not None:
         grad = -p.k_null * (q[idx] - q_mid[idx]) / (0.5 * q_rng[idx])
         qd_f = qd_f + nullspace_projector(Jf) @ grad
     qd = np.zeros(n)
@@ -840,7 +847,11 @@ def rotational_inertia(robot, q) -> np.ndarray:
     mujoco.mj_fullM(m, d, M)
     robot.fk(q)
     Jr = robot.jac()[3:]
-    return np.linalg.inv(Jr @ np.linalg.solve(M, Jr.T))
+    mobility = Jr @ np.linalg.solve(M, Jr.T)
+    if np.linalg.matrix_rank(mobility) < 3:
+        raise ValueError(f"{robot.spec.name}: PIC rotational inertia is undefined at this start "
+                         "(angular mobility has rank below three)")
+    return np.linalg.inv(mobility)
 
 
 def orientation_params(robot, q, task_cfg: dict) -> OrientParams | None:
@@ -862,7 +873,4 @@ def orientation_params(robot, q, task_cfg: dict) -> OrientParams | None:
     w, V = np.linalg.eigh(0.5 * (Lam + Lam.T))
     # Fixed damping from the square root of the rotational inertia at q.
     D = 2.0 * zeta * np.sqrt(K_r) * (V * np.sqrt(w)) @ V.T
-    R_des = np.asarray(task_cfg.get("R_des", R_DES_DEFAULT), float)
-    if not (np.allclose(R_des @ R_des.T, np.eye(3), atol=1e-09) and np.linalg.det(R_des) > 0):
-        raise ValueError("task.R_des must be a rotation matrix")
-    return OrientParams(mode, R_des, K_r, zeta, D, Lam)
+    return OrientParams(mode, _desired_rotation(task_cfg), K_r, zeta, D, Lam)
